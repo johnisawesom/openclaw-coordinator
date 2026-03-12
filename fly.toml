@@ -2,7 +2,7 @@ app = "openclaw-coordinator"
 primary_region = "syd"
 
 [build]
-dockerfile = "Dockerfile"
+  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080
@@ -16,4 +16,4 @@ dockerfile = "Dockerfile"
     interval = "30s"
     method = "GET"
     timeout = "5s"
-    path = "/health"   # matches your index.ts health server
+    path = "/health"
