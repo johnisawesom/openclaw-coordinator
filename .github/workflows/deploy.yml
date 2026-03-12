@@ -1,29 +1,19 @@
-name: Deploy to Fly.io
+name: Fly Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   deploy:
-    name: Deploy openclaw-coordinator
+    name: Deploy app
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     concurrency:
-      group: fly-deploy-${{ github.ref }}
-      cancel-in-progress: false   # never cancel an in-flight deploy
-
+      group: deploy-group
+      cancel-in-progress: true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Deploy to Fly.io (Sydney)
-        run: flyctl deploy --remote-only --region syd --app openclaw-coordinator
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          FLY_REGION: syd
-          FLY_APP: openclaw-coordinato
