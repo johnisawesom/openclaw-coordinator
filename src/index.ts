@@ -80,6 +80,9 @@ async function run(): Promise<void> {
 
   const cwd = process.cwd();
 
+  // TEMP: force tsc failure simulation
+  throw new Error("Simulated coordinator crash to test logging + PR creation");
+
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
