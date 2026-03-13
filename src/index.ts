@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { execSync } from "child_process";
-import { createServer } from "http"; // ← NEW: for /health
+import { createServer } from "http";
 import {
   logger,
   logErrorMemory,
@@ -24,7 +24,7 @@ function requireEnv(name: string): string {
 
 const OWNER = requireEnv("GITHUB_OWNER");
 const REPO = requireEnv("GITHUB_REPO");
-const GITHUB_PAT = requireEnv("GITHUB_PAT"); // ← Force read here to crash early if missing/wrong name
+const GITHUB_PAT = requireEnv("GITHUB_PAT");
 
 // Log secret presence (masked) for debug
 console.log(`[startup] GITHUB_PAT present: ${!!GITHUB_PAT} (length: ${GITHUB_PAT?.length ?? 0})`);
@@ -42,7 +42,6 @@ const server = createServer((req, res) => {
     res.end();
   }
 });
-
 server.listen(8080, "0.0.0.0", () => {
   console.log("[health] Listening on 0.0.0.0:8080");
 });
@@ -77,10 +76,9 @@ function parseErrorMemories(tscOutput: string): ErrorMemory[] {
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
-
   const cwd = process.cwd();
 
-  // TEMP: force tsc failure simulation
+  // TEMP: uncomment this block to force error path / test Qdrant + GitHub without real tsc fail
   throw new Error("Simulated coordinator crash to test logging + PR creation");
 
   // 1. Run tsc
@@ -117,11 +115,14 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch
+    // 5. Create fix branch (with null guard to fix TS2345)
     let branchName: string | null = null;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
       branchName = `fix/tsc-errors-${Date.now()}`;
+      if (branchName === null) {
+        throw new Error("branchName unexpectedly null");
+      }
       await createBranch(OWNER, REPO, branchName, baseSha);
       await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
     } catch (err: any) {
@@ -131,8 +132,8 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR
-    if (branchName) {
+    // 6. Open draft PR (with null guard)
+    if (branchName !== null) {
       try {
         const pr = await createPullRequest(
           OWNER,
@@ -154,6 +155,8 @@ async function run(): Promise<void> {
           stack: err.stack,
         });
       }
+    } else {
+      await logger.warn("Skipping PR — branchName was null");
     }
   }
 
@@ -174,6 +177,4 @@ run()
   })
   .finally(() => {
     console.log("[shutdown] Run finished — keeping server alive for Fly health check");
-    // Server keeps running — machine won't exit immediately
   });
-
