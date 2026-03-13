@@ -26,6 +26,7 @@ export interface StructuredLogEntry {
 // ── Constants ─────────────────────────────────────────────────────────────────
 const COLLECTION_NAME = "coordinator_logs";
 const VECTOR_SIZE = 1536; // matches collection
+const VECTOR_NAME = "dense"; // ← CHANGE THIS if you named it "initial" in dashboard
 
 // ── Singleton + bootstrap ─────────────────────────────────────────────────────
 let _client: QdrantClient | null = null;
@@ -48,7 +49,9 @@ async function getClient(): Promise<QdrantClient> {
     } catch (err: any) {
       if (err?.status === 404) {
         await _client.createCollection(COLLECTION_NAME, {
-          vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+          vectors: {
+            [VECTOR_NAME]: { size: VECTOR_SIZE, distance: "Cosine" },
+          },
         });
       } else {
         throw err;
@@ -64,19 +67,19 @@ function getId(): number {
   return Date.now() * 1000 + Math.floor(Math.random() * 1000);
 }
 
-// ── Upsert helper — dummy zero vector to satisfy VectorStruct ─────────────────
+// ── Upsert helper — named vector format ───────────────────────────────────────
 async function upsert(payload: Record<string, unknown>): Promise<void> {
   const client = await getClient().catch(() => null);
   if (!client) return;
 
-  const dummyVector = new Array(VECTOR_SIZE).fill(0); // valid for cosine
+  const dummyVector = new Array(VECTOR_SIZE).fill(0);
 
   try {
     await client.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
         id: getId(),
-        vector: dummyVector,   // ← this satisfies the enum + server
+        vector: { [VECTOR_NAME]: dummyVector },  // ← THIS LINE: named format
         payload,
       }],
     });
