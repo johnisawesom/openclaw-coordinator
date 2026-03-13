@@ -9,7 +9,9 @@ export interface ErrorMemory {
   stack?: string;
   context?: Record<string, unknown>;
 }
+
 export type LogLevel = "info" | "warn" | "error" | "debug";
+
 export interface StructuredLogEntry {
   level: LogLevel;
   message: string;
@@ -20,21 +22,26 @@ export interface StructuredLogEntry {
   repo?: string;
   context?: Record<string, unknown>;
 }
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const COLLECTION_NAME = "coordinator_logs";
-const VECTOR_SIZE = 1536; // placeholder for future
+const VECTOR_SIZE = 1536; // matches collection
+
 // ── Singleton + bootstrap ─────────────────────────────────────────────────────
 let _client: QdrantClient | null = null;
 let _bootstrapped = false;
+
 async function getClient(): Promise<QdrantClient> {
   if (_client) return _client;
+
   const url = process.env.QDRANT_URL;
   const apiKey = process.env.QDRANT_API_KEY;
   if (!url || !apiKey) {
     throw new Error("Missing QDRANT_URL or QDRANT_API_KEY");
   }
+
   _client = new QdrantClient({ url, apiKey });
-  // Bootstrap once
+
   if (!_bootstrapped) {
     try {
       await _client.getCollection(COLLECTION_NAME);
@@ -51,23 +58,25 @@ async function getClient(): Promise<QdrantClient> {
   }
   return _client;
 }
+
 // ── Safe ID ───────────────────────────────────────────────────────────────────
 function getId(): number {
   return Date.now() * 1000 + Math.floor(Math.random() * 1000);
 }
-// ── Upsert helper ─────────────────────────────────────────────────────────────
+
+// ── Upsert helper — dummy zero vector to satisfy VectorStruct ─────────────────
 async function upsert(payload: Record<string, unknown>): Promise<void> {
-  const client = await getClient().catch(err => {
-    console.error("[qdrant] Client init failed:", err);
-    return null;
-  });
+  const client = await getClient().catch(() => null);
   if (!client) return;
+
+  const dummyVector = new Array(VECTOR_SIZE).fill(0); // valid for cosine
+
   try {
     await client.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
         id: getId(),
-        vector: null as any,  // ← THIS LINE: type assertion to bypass TS2322
+        vector: dummyVector,   // ← this satisfies the enum + server
         payload,
       }],
     });
@@ -75,6 +84,7 @@ async function upsert(payload: Record<string, unknown>): Promise<void> {
     console.error("[qdrant-logger] upsert failed:", err);
   }
 }
+
 // ── Structured log ────────────────────────────────────────────────────────────
 export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
   const payload = {
@@ -87,11 +97,12 @@ export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
     repo: entry.repo ?? "",
     context: entry.context ?? {},
   };
+
   await upsert(payload).catch(() => {
-    // fallback console
     console.log(`[${entry.level.toUpperCase()}] ${entry.timestamp} ${entry.message}`, entry.context ?? "");
   });
 }
+
 // ── Error memory log ──────────────────────────────────────────────────────────
 export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
   const payload = {
@@ -104,6 +115,7 @@ export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
   };
   await upsert(payload);
 }
+
 // ── Logger object ─────────────────────────────────────────────────────────────
 export const logger = {
   info: (msg: string, ctx?: Record<string, unknown>) => logToQdrant({ level: "info", message: msg, timestamp: new Date().toISOString(), context: ctx }),
