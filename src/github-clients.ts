@@ -13,8 +13,8 @@ let _octokit: InstanceType<typeof ThrottledOctokit> | null = null;
 export function getOctokit(): InstanceType<typeof ThrottledOctokit> {
   if (_octokit) return _octokit;
 
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new Error("GITHUB_TOKEN environment variable is not set");
+  const token = process.env.GITHUB_PAT;
+  if (!token) throw new Error("GITHUB_PAT environment variable is not set");
 
   _octokit = new ThrottledOctokit({
     auth: token,
