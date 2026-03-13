@@ -1,56 +1,57 @@
 // src/github-clients.ts
-import { Octokit } from "@octokit/rest";
+import { Octokit } from "@octokit/core";
 import { throttling } from "@octokit/plugin-throttling";
-import { logToQdrant } from "./qdrant-logger.js";
+import { retry } from "@octokit/plugin-retry";
+import { logger } from "./qdrant-logger.js";
 
-const ThrottledOctokit = Octokit.plugin(throttling);
+// ── Singleton Octokit with throttling + retry ─────────────────────────────────
 
-let octokitSingleton: InstanceType<typeof ThrottledOctokit> | null = null;
+const ThrottledOctokit = Octokit.plugin(throttling, retry);
+
+let _octokit: InstanceType<typeof ThrottledOctokit> | null = null;
 
 export function getOctokit(): InstanceType<typeof ThrottledOctokit> {
-  if (octokitSingleton) return octokitSingleton;
+  if (_octokit) return _octokit;
 
   const token = process.env.GITHUB_TOKEN;
-  if (!token) {
-    throw new Error("GITHUB_TOKEN environment variable is not set");
-  }
+  if (!token) throw new Error("GITHUB_TOKEN environment variable is not set");
 
-  octokitSingleton = new ThrottledOctokit({
+  _octokit = new ThrottledOctokit({
     auth: token,
     throttle: {
-      onRateLimit: (retryAfter: number, options: any) => {
-        logToQdrant({
-          level: "warn",
-          message: `Rate limit hit for ${options.method} ${options.url}. Retrying after ${retryAfter}s.`,
-          timestamp: new Date().toISOString(),
-          context: { retryAfter, url: options.url, method: options.method },
-        }).catch(console.error);
+      onRateLimit(retryAfter: number, options: any): boolean {
+        logger
+          .warn(`Rate limit hit for ${options.method} ${options.url} — retry in ${retryAfter}s`, {
+            retryAfter,
+            retryCount: options.request.retryCount,
+          })
+          .catch(console.error);
         return options.request.retryCount < 3;
       },
-      onSecondaryRateLimit: (retryAfter: number, options: any) => {
-        logToQdrant({
-          level: "warn",
-          message: `Secondary rate limit hit for ${options.method} ${options.url}. Retrying after ${retryAfter}s.`,
-          timestamp: new Date().toISOString(),
-          context: { retryAfter, url: options.url, method: options.method },
-        }).catch(console.error);
+      onSecondaryRateLimit(retryAfter: number, options: any): boolean {
+        logger
+          .warn(`Secondary rate limit for ${options.method} ${options.url} — retry in ${retryAfter}s`, {
+            retryAfter,
+            retryCount: options.request.retryCount,
+          })
+          .catch(console.error);
         return options.request.retryCount < 2;
       },
     },
   });
 
-  return octokitSingleton;
+  return _octokit;
 }
 
 // ── PR helpers ────────────────────────────────────────────────────────────────
 
-export async function getPullRequest(
-  owner: string,
-  repo: string,
-  pullNumber: number
-) {
+export async function getPullRequest(owner: string, repo: string, pullNumber: number) {
   const octokit = getOctokit();
-  const { data } = await octokit.pulls.get({ owner, repo, pull_number: pullNumber });
+  const { data } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+    owner,
+    repo,
+    pull_number: pullNumber,
+  });
   return data;
 }
 
@@ -63,7 +64,14 @@ export async function createPullRequest(
   body: string
 ) {
   const octokit = getOctokit();
-  const { data } = await octokit.pulls.create({ owner, repo, title, head, base, body });
+  const { data } = await octokit.request("POST /repos/{owner}/{repo}/pulls", {
+    owner,
+    repo,
+    title,
+    head,
+    base,
+    body,
+  });
   return data;
 }
 
@@ -74,7 +82,7 @@ export async function mergePullRequest(
   commitTitle?: string
 ) {
   const octokit = getOctokit();
-  const { data } = await octokit.pulls.merge({
+  const { data } = await octokit.request("PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge", {
     owner,
     repo,
     pull_number: pullNumber,
@@ -93,7 +101,7 @@ export async function createBranch(
   fromSha: string
 ) {
   const octokit = getOctokit();
-  const { data } = await octokit.git.createRef({
+  const { data } = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
     owner,
     repo,
     ref: `refs/heads/${branchName}`,
@@ -102,26 +110,26 @@ export async function createBranch(
   return data;
 }
 
-export async function deleteBranch(
-  owner: string,
-  repo: string,
-  branchName: string
-) {
+export async function deleteBranch(owner: string, repo: string, branchName: string) {
   const octokit = getOctokit();
-  await octokit.git.deleteRef({
+  await octokit.request("DELETE /repos/{owner}/{repo}/git/refs/{ref}", {
     owner,
     repo,
-    ref: `refs/heads/${branchName}`,
+    ref: `heads/${branchName}`,
   });
 }
 
 export async function getDefaultBranchSha(
   owner: string,
   repo: string,
-  branch: string = "main"
+  branch = "main"
 ): Promise<string> {
   const octokit = getOctokit();
-  const { data } = await octokit.repos.getBranch({ owner, repo, branch });
+  const { data } = await octokit.request("GET /repos/{owner}/{repo}/branches/{branch}", {
+    owner,
+    repo,
+    branch,
+  });
   return data.commit.sha;
 }
 
@@ -135,7 +143,7 @@ export async function createCommit(
   parentShas: string[]
 ) {
   const octokit = getOctokit();
-  const { data } = await octokit.git.createCommit({
+  const { data } = await octokit.request("POST /repos/{owner}/{repo}/git/commits", {
     owner,
     repo,
     message,
@@ -150,10 +158,10 @@ export async function updateBranchRef(
   repo: string,
   branchName: string,
   commitSha: string,
-  force: boolean = false
+  force = false
 ) {
   const octokit = getOctokit();
-  const { data } = await octokit.git.updateRef({
+  const { data } = await octokit.request("PATCH /repos/{owner}/{repo}/git/refs/{ref}", {
     owner,
     repo,
     ref: `heads/${branchName}`,
