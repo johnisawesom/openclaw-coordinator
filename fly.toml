@@ -1,7 +1,7 @@
 app = "openclaw-coordinator"
 primary_region = "syd"
 
-[build]
+[build] 
   dockerfile = "Dockerfile"
 
 [http_service]
