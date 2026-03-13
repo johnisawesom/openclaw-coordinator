@@ -1,6 +1,8 @@
 // src/prompt-builder.ts
 import { ErrorMemory } from "./qdrant-logger.js";
 
+export type { ErrorMemory };
+
 export interface FixPrompt {
   systemPrompt: string;
   userPrompt: string;
@@ -8,18 +10,22 @@ export interface FixPrompt {
 
 export function buildFixPrompt(
   tscErrors: string,
-  errorMemories: ErrorMemory[]
+  recentMemories: ErrorMemory[] = []
 ): FixPrompt {
-  const systemPrompt = `You are an expert TypeScript engineer specialising in strict ESM compilation (module: node16 / nodenext).
-Your task is to produce minimal, correct code patches that resolve all TypeScript compiler errors without changing runtime behaviour.
-Return ONLY the corrected file contents in fenced code blocks labelled with the filename. Do not add explanations outside the code blocks.`;
+  const systemPrompt = `You are an expert TypeScript engineer specialising in strict ESM compilation \
+(module: node16 / nodenext).
+Your task is to produce minimal, correct code patches that resolve all TypeScript compiler errors \
+without changing runtime behaviour.
+Return ONLY the corrected file contents in fenced code blocks labelled with the filename. \
+Do not add explanations outside the code blocks.`;
 
   const memorySummary =
-    errorMemories.length > 0
-      ? errorMemories
+    recentMemories.length > 0
+      ? recentMemories
           .map(
             (m) =>
-              `[${m.timestamp}] (${m.bot_name}) ${m.message}${m.stack ? `\n  Stack: ${m.stack}` : ""}`
+              `[${m.timestamp}] (${m.bot_name}) ${m.message}` +
+              (m.stack ? `\n  Stack: ${m.stack}` : "")
           )
           .join("\n")
       : "No prior error memory.";
