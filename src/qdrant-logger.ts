@@ -2,7 +2,6 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
 export interface ErrorMemory {
   bot_name: string;
   timestamp: string;
@@ -24,54 +23,87 @@ export interface StructuredLogEntry {
   context?: Record<string, unknown>;
 }
 
-// ── Qdrant client singleton ───────────────────────────────────────────────────
-
+// ── Constants ─────────────────────────────────────────────────────────────────
 const COLLECTION_NAME = "coordinator_logs";
+const VECTOR_SIZE = 1536; // for future embeddings (OpenAI ada-002)
 
+// ── Qdrant client singleton ───────────────────────────────────────────────────
 let _qdrantClient: QdrantClient | null = null;
-
 function getQdrantClient(): QdrantClient | null {
   const url = process.env.QDRANT_URL;
-  if (!url) return null;
+  const apiKey = process.env.QDRANT_API_KEY;
+  if (!url || !apiKey) return null;
+
   if (!_qdrantClient) {
-    _qdrantClient = new QdrantClient({ url, apiKey: process.env.QDRANT_API_KEY });
+    _qdrantClient = new QdrantClient({ url, apiKey });
   }
   return _qdrantClient;
 }
 
-// ── ID counter ────────────────────────────────────────────────────────────────
+// ── One-time collection bootstrap ─────────────────────────────────────────────
+let _collectionBootstrapped = false;
+async function bootstrapCollection(): Promise<void> {
+  if (_collectionBootstrapped) return;
 
-let _idCounter = Date.now();
-function nextId(): number {
-  return _idCounter++;
+  const client = getQdrantClient();
+  if (!client) return;
+
+  try {
+    await client.getCollection(COLLECTION_NAME);
+    console.log(`[qdrant-logger] Collection '${COLLECTION_NAME}' already exists`);
+  } catch (err: any) {
+    if (err?.status === 404) {
+      await client.createCollection(COLLECTION_NAME, {
+        vectors: {
+          size: VECTOR_SIZE,
+          distance: "Cosine",
+        },
+      });
+      console.log(`[qdrant-logger] Created collection '${COLLECTION_NAME}'`);
+    } else {
+      console.error("[qdrant-logger] Collection bootstrap failed:", err);
+    }
+  }
+
+  _collectionBootstrapped = true;
+}
+
+// ── Safe ID generator ─────────────────────────────────────────────────────────
+function generatePointId(): number {
+  return Date.now() * 1000 + Math.floor(Math.random() * 1000);
 }
 
 // ── Core upsert helper ────────────────────────────────────────────────────────
-
 async function upsertPoint(payload: Record<string, unknown>): Promise<void> {
   const client = getQdrantClient();
-  if (!client) return; // console fallback handled by callers
+  if (!client) return;
+
+  await bootstrapCollection();
 
   const point = {
-    id: nextId(),
-    vector: null as any,
+    id: generatePointId(),
+    vector: null,           // explicit null — fixes VectorStruct error
     payload,
   };
 
-  await client.upsert(COLLECTION_NAME, {
-    wait: true,
-    points: [point as any],
-  });
+  try {
+    await client.upsert(COLLECTION_NAME, {
+      wait: true,
+      points: [point],
+    });
+  } catch (err) {
+    console.error("[qdrant-logger] upsert failed:", err);
+    // fallback handled by caller
+  }
 }
 
 // ── Structured log ────────────────────────────────────────────────────────────
-
 export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
   const payload: Record<string, unknown> = {
     log_level: entry.level,
     message: entry.message,
     timestamp: entry.timestamp,
-    bot_name: entry.bot_name ?? "coordinator",
+    bot_name: entry.bot_name ?? (process.env.BOT_NAME || "coordinator"),
     run_id: entry.run_id ?? "",
     pr_number: entry.pr_number ?? null,
     repo: entry.repo ?? "",
@@ -87,13 +119,12 @@ export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
   try {
     await upsertPoint(payload);
   } catch (err) {
-    console.error("[qdrant-logger] upsert failed:", err);
+    console.error("[qdrant-logger] logToQdrant failed:", err);
     consoleFallback(entry.level, entry.timestamp, entry.message, entry.context);
   }
 }
 
 // ── Error-memory log ──────────────────────────────────────────────────────────
-
 export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
   const payload: Record<string, unknown> = {
     log_level: "error",
@@ -118,7 +149,6 @@ export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
 }
 
 // ── Console fallback ──────────────────────────────────────────────────────────
-
 function consoleFallback(
   level: LogLevel,
   ts: string,
@@ -126,19 +156,18 @@ function consoleFallback(
   context?: Record<string, unknown>
 ): void {
   const prefix = `[${level.toUpperCase()}] ${ts}`;
+  const ctxStr = context ? JSON.stringify(context) : "";
   if (level === "error") {
-    console.error(prefix, message, context ?? "");
+    console.error(prefix, message, ctxStr);
   } else if (level === "warn") {
-    console.warn(prefix, message, context ?? "");
+    console.warn(prefix, message, ctxStr);
   } else {
-    console.log(prefix, message, context ?? "");
+    console.log(prefix, message, ctxStr);
   }
 }
 
 // ── Named logger object (consumed by other modules) ──────────────────────────
-
 const BOT = process.env.BOT_NAME ?? "coordinator";
-
 function ts(): string {
   return new Date().toISOString();
 }
