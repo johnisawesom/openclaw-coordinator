@@ -78,8 +78,8 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // TEMP: uncomment this block to force error path / test Qdrant + GitHub without real tsc fail
-  throw new Error("Simulated coordinator crash to test logging + PR creation");
+  // TEMP: uncomment ONLY AFTER build succeeds, to force error path test
+  // throw new Error("Simulated coordinator crash to test logging + PR creation");
 
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
@@ -115,13 +115,13 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch (with null guard to fix TS2345)
+    // 5. Create fix branch — with null guard
     let branchName: string | null = null;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
       branchName = `fix/tsc-errors-${Date.now()}`;
-      if (branchName === null) {
-        throw new Error("branchName unexpectedly null");
+      if (!branchName) {
+        throw new Error("branchName generation failed (null)");
       }
       await createBranch(OWNER, REPO, branchName, baseSha);
       await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
@@ -132,14 +132,14 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR (with null guard)
-    if (branchName !== null) {
+    // 6. Open draft PR — only if branchName is non-null
+    if (branchName) {
       try {
         const pr = await createPullRequest(
           OWNER,
           REPO,
           `[OpenClaw] Fix TypeScript compilation errors (${errorMemories.length} errors)`,
-          branchName,
+          branchName,  // type-narrowed to string here
           "main",
           `## Automated Fix\n\nThis PR was opened by the OpenClaw Coordinator to address ` +
             `${errorMemories.length} TypeScript compiler error(s).\n\n### Errors\n\n\`\`\`\n` +
@@ -156,7 +156,7 @@ async function run(): Promise<void> {
         });
       }
     } else {
-      await logger.warn("Skipping PR — branchName was null");
+      await logger.warn("Skipping PR creation — branchName was null");
     }
   }
 
