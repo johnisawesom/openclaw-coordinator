@@ -78,15 +78,12 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // TEMP: uncomment ONLY to force error path test (after build succeeds)
-  // throw new Error("Simulated coordinator crash to test logging + PR creation");
+  // TEMP: force runtime error path (uncomment to test Qdrant + PR)
+  // throw new Error("Simulated runtime crash to test logging + PR creation");
 
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
-
-  // TEMP: force runtime error to test Qdrant logging + GitHub PR path
-  throw new Error("Simulated runtime crash in Coordinator to test logging/PR");
 
   if (success) {
     await logger.info("TypeScript compilation succeeded — nothing to do.");
@@ -123,11 +120,11 @@ async function run(): Promise<void> {
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
       branchName = `fix/tsc-errors-${Date.now()}`;
-      if (!branchName) {
-        throw new Error("branchName was falsy after generation");
+      if (branchName == null) {
+        throw new Error("branchName generation returned null");
       }
-      // Explicit non-null assertion after guard — tsc should accept this
-      await createBranch(OWNER, REPO, branchName!, baseSha);
+      // Type narrowed to string — tsc happy
+      await createBranch(OWNER, REPO, branchName, baseSha);
       await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
     } catch (err: any) {
       await logger.error("Failed to create fix branch", {
@@ -137,9 +134,9 @@ async function run(): Promise<void> {
     }
 
     // 6. Open draft PR
-    if (branchName) {
+    if (branchName != null) {
       try {
-        // branchName is string here
+        // branchName is string here — no TS2345
         const pr = await createPullRequest(
           OWNER,
           REPO,
@@ -161,7 +158,7 @@ async function run(): Promise<void> {
         });
       }
     } else {
-      await logger.warn("Skipping PR — branchName was null or falsy");
+      await logger.warn("Skipping PR — branchName was null");
     }
   }
 
