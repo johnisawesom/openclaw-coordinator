@@ -26,6 +26,7 @@ const VECTOR_NAME = "dense";
 const VECTOR_SIZE = 1536;
 
 let client: QdrantClient | null = null;
+let pointIdCounter = Date.now(); // simple monotonic counter, starts at current timestamp
 
 async function getClient(): Promise<QdrantClient | null> {
   if (client) return client;
@@ -58,7 +59,7 @@ async function getClient(): Promise<QdrantClient | null> {
       console.log("[qdrant-logger] Collection created");
     } else {
       console.error("[qdrant-logger] Collection check failed:", err.message || err);
-      if (err.response) console.error("[qdrant-logger] Collection error response:", JSON.stringify(err.response));
+      if (err.data) console.error("[qdrant-logger] Full error data:", JSON.stringify(err.data));
       client = null;
       return null;
     }
@@ -71,36 +72,42 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  // Test 1: named format (expected)
   const vector = new Float32Array(VECTOR_SIZE);
-  vector.fill(0.1); // non-zero floats to avoid any zero-filter bugs
+  vector.fill(0.0);
 
-  const pointId = `test-named-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  // Valid point ID: unsigned integer
+  const pointId = pointIdCounter++;
+  console.log("[qdrant-logger] Using integer point ID:", pointId);
 
   try {
     await cl.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
-        id: pointId,
+        id: pointId,                  // number, not string
         vector: { [VECTOR_NAME]: Array.from(vector) },
         payload
       }]
     });
-    console.log(`[qdrant-logger] Named upsert success - id: ${pointId}`);
+    console.log(`[qdrant-logger] Upsert success - id: ${pointId}`);
 
-    const retrieved = await cl.retrieve(COLLECTION_NAME, { ids: [pointId], with_payload: true });
+    // Verify
+    const retrieved = await cl.retrieve(COLLECTION_NAME, {
+      ids: [pointId],
+      with_payload: true
+    });
     if (retrieved.length > 0) {
-      console.log("[qdrant-logger] VERIFY SUCCESS named");
+      console.log("[qdrant-logger] VERIFY SUCCESS - point stored");
       return true;
     }
-    console.error("[qdrant-logger] VERIFY FAIL named");
+
+    console.error("[qdrant-logger] VERIFY FAIL - retrieve returned nothing");
     return false;
   } catch (err: any) {
-    console.error("[qdrant-logger] Named upsert FAILED. Details:");
+    console.error("[qdrant-logger] Upsert failed. Details:");
     console.error("Message:", err.message);
     console.error("Status:", err.status);
-    console.error("Response data:", err.response?.data || err.response || "no response data");
-    console.error("Full err:", JSON.stringify(err, null, 2).slice(0, 1000));
+    console.error("Response data:", err.data ? JSON.stringify(err.data) : "no data");
+    console.error("Full err keys:", Object.keys(err));
     return false;
   }
 }
@@ -148,13 +155,12 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-// Proof on load
+// Proof on startup
 (async () => {
-  console.log("[qdrant-logger] Module loaded - running named vector proof");
+  console.log("[qdrant-logger] Module loaded - running proof with integer ID");
   await logErrorMemory({
     bot_name: "coordinator",
     timestamp: new Date().toISOString(),
-    message: "PROOF v-named-float-20260314 - expect detailed 400 or success"
+    message: "PROOF v-integer-id-20260314 - this should land in Qdrant now"
   });
 })();
-
