@@ -81,7 +81,7 @@ async function run(): Promise<void> {
   // FORCE RUNTIME ERROR PATH — this will trigger Qdrant logging + GitHub PR attempt
   throw new Error("Simulated runtime crash to test logging + PR creation");
 
-  // 1. Run tsc (never reached because of throw above)
+  // 1. Run tsc (never reached)
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
@@ -90,7 +90,6 @@ async function run(): Promise<void> {
   } else {
     await logger.warn("TypeScript errors detected", { error_output: tscOutput });
 
-    // 2. Persist error memories
     const errorMemories: ErrorMemory[] = parseErrorMemories(tscOutput);
     for (const mem of errorMemories) {
       await logErrorMemory(mem).catch((err) =>
@@ -98,7 +97,6 @@ async function run(): Promise<void> {
       );
     }
 
-    // 3. Build fix prompt
     const { systemPrompt, userPrompt } = buildFixPrompt(tscOutput, errorMemories);
     await logger.info("Fix prompt constructed", {
       system_prompt_length: systemPrompt.length,
@@ -106,7 +104,6 @@ async function run(): Promise<void> {
       error_count: errorMemories.length,
     });
 
-    // 4. Write prompts to disk
     const promptDir = path.join(os.tmpdir(), "openclaw-prompts");
     fs.mkdirSync(promptDir, { recursive: true });
     const systemPath = path.join(promptDir, "system.txt");
@@ -115,7 +112,6 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch — branchName is ALWAYS string (no null)
     const branchName = `fix/tsc-errors-${Date.now()}`;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
@@ -128,7 +124,6 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR — branchName is string
     try {
       const pr = await createPullRequest(
         OWNER,
@@ -154,7 +149,6 @@ async function run(): Promise<void> {
 
   await logger.info("Coordinator run complete");
 
-  // Keep alive temporarily
   await new Promise((resolve) => setTimeout(resolve, 30000));
 }
 
@@ -164,8 +158,8 @@ run()
     await logger.error("Unhandled error in coordinator run", {
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
-    }).catch(() => {});
-    process.exit(1);
+    }).catch(() => console.error("Logger failed during crash logging"));
+    console.error("[CRASH] Coordinator threw error but server stays alive for Fly health check");
   })
   .finally(() => {
     console.log("[shutdown] Run finished — keeping server alive for Fly health check");
