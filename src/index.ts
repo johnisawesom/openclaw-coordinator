@@ -78,10 +78,10 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // TEMP: force runtime error path (uncomment to test Qdrant + PR)
+  // FORCE RUNTIME ERROR PATH — this will trigger Qdrant logging + GitHub PR attempt
   throw new Error("Simulated runtime crash to test logging + PR creation");
 
-  // 1. Run tsc
+  // 1. Run tsc (never reached because of throw above)
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
@@ -115,15 +115,10 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch
-    let branchName: string | null = null;
+    // 5. Create fix branch — branchName is ALWAYS string (no null)
+    const branchName = `fix/tsc-errors-${Date.now()}`;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
-      branchName = `fix/tsc-errors-${Date.now()}`;
-      if (branchName == null) {
-        throw new Error("branchName generation returned null");
-      }
-      // Type narrowed to string — tsc happy
       await createBranch(OWNER, REPO, branchName, baseSha);
       await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
     } catch (err: any) {
@@ -133,32 +128,27 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR
-    if (branchName != null) {
-      try {
-        // branchName is string here — no TS2345
-        const pr = await createPullRequest(
-          OWNER,
-          REPO,
-          `[OpenClaw] Fix TypeScript compilation errors (${errorMemories.length} errors)`,
-          branchName,
-          "main",
-          `## Automated Fix\n\nThis PR was opened by the OpenClaw Coordinator to address ` +
-            `${errorMemories.length} TypeScript compiler error(s).\n\n### Errors\n\n\`\`\`\n` +
-            `${tscOutput.slice(0, 3000)}\n\`\`\``
-        );
-        await logger.info("Draft PR created", {
-          pr_number: (pr as any).number,
-          pr_url: (pr as any).html_url,
-        });
-      } catch (err: any) {
-        await logger.error("Failed to create draft PR", {
-          error: err.message,
-          stack: err.stack,
-        });
-      }
-    } else {
-      await logger.warn("Skipping PR — branchName was null");
+    // 6. Open draft PR — branchName is string
+    try {
+      const pr = await createPullRequest(
+        OWNER,
+        REPO,
+        `[OpenClaw] Fix TypeScript compilation errors (${errorMemories.length} errors)`,
+        branchName,
+        "main",
+        `## Automated Fix\n\nThis PR was opened by the OpenClaw Coordinator to address ` +
+          `${errorMemories.length} TypeScript compiler error(s).\n\n### Errors\n\n\`\`\`\n` +
+          `${tscOutput.slice(0, 3000)}\n\`\`\``
+      );
+      await logger.info("Draft PR created", {
+        pr_number: (pr as any).number,
+        pr_url: (pr as any).html_url,
+      });
+    } catch (err: any) {
+      await logger.error("Failed to create draft PR", {
+        error: err.message,
+        stack: err.stack,
+      });
     }
   }
 
