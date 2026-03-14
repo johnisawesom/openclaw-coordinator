@@ -85,6 +85,9 @@ async function run(): Promise<void> {
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
+  // TEMP: force runtime error to test Qdrant logging + GitHub PR path
+  throw new Error("Simulated runtime crash in Coordinator to test logging/PR");
+
   if (success) {
     await logger.info("TypeScript compilation succeeded — nothing to do.");
   } else {
