@@ -46,7 +46,7 @@ async function getClient(): Promise<QdrantClient | null> {
     console.log("[qdrant-logger] Collection exists. Vectors config:", JSON.stringify(coll.config?.params?.vectors));
   } catch (err: any) {
     if (err.status === 404) {
-      console.log("[qdrant-logger] Collection not found - creating with named vector");
+      console.log("[qdrant-logger] Creating collection with named vector 'dense'");
       await client.createCollection(COLLECTION_NAME, {
         vectors: {
           [VECTOR_NAME]: {
@@ -70,31 +70,44 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  const vector = new Array(VECTOR_SIZE).fill(0.0);
-  const pointId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  // Explicit Float32Array - Qdrant is very strict about float vectors
+  const vectorData = new Float32Array(VECTOR_SIZE);
+  for (let i = 0; i < VECTOR_SIZE; i++) {
+    vectorData[i] = 0.0; // guaranteed float
+  }
+
+  const pointId = `proof-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   try {
-    await cl.upsert(COLLECTION_NAME, {
+    const upsertResult = await cl.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
         id: pointId,
-        vector: { [VECTOR_NAME]: vector },
+        vector: { [VECTOR_NAME]: Array.from(vectorData) }, // convert back to plain array for serialization
         payload
       }]
     });
-    console.log(`[qdrant-logger] Upsert success - id: ${pointId}`);
+    console.log(`[qdrant-logger] Upsert success - id: ${pointId}, result:`, JSON.stringify(upsertResult));
 
-    // Verify it actually landed
-    const retrieved = await cl.retrieve(COLLECTION_NAME, { ids: [pointId] });
+    // Verify
+    const retrieved = await cl.retrieve(COLLECTION_NAME, {
+      ids: [pointId],
+      with_payload: true
+    });
     if (retrieved.length > 0) {
-      console.log("[qdrant-logger] VERIFY SUCCESS - point is in Qdrant");
+      console.log("[qdrant-logger] VERIFY SUCCESS - point stored. Payload snippet:", JSON.stringify(retrieved[0].payload).slice(0, 200));
       return true;
     }
 
-    console.error("[qdrant-logger] VERIFY FAIL - upsert reported success but retrieve returned nothing");
+    console.error("[qdrant-logger] VERIFY FAIL - upsert ok but retrieve empty");
     return false;
   } catch (err: any) {
-    console.error("[qdrant-logger] Upsert failed:", err.message || err, "status:", err.status);
+    // Log FULL error details - this is critical
+    console.error("[qdrant-logger] Upsert failed. Full error details:");
+    console.error("Message:", err.message);
+    console.error("Status:", err.status);
+    console.error("Response body:", err.response?.data || err.response || "no body");
+    console.error("Stack:", err.stack?.slice(0, 500));
     return false;
   }
 }
@@ -124,7 +137,7 @@ export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
   };
   const success = await upsertPoint(payload);
   if (!success) {
-    console.log(`[${entry.level.toUpperCase()}] ${entry.timestamp} ${entry.message} (Qdrant upsert failed)`);
+    console.log(`[${entry.level.toUpperCase()}] ${entry.message} (Qdrant failed)`);
   }
 }
 
@@ -142,13 +155,13 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-// Run a proof-of-life log on every module load (startup)
+// Startup proof
 (async () => {
-  console.log("[qdrant-logger] Module loaded - executing startup proof log");
+  console.log("[qdrant-logger] Module loaded - running proof upsert");
   await logErrorMemory({
     bot_name: "coordinator",
     timestamp: new Date().toISOString(),
-    message: "PROOF STARTUP LOG v-named-format - should appear in Qdrant if upsert succeeds",
-    context: { version: "named-20260314" }
+    message: "PROOF v-float32-named-20260314 - check dashboard if this point appears",
+    context: { test: "vector-format-fix" }
   });
 })();
