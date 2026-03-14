@@ -78,34 +78,37 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
+  // TEST: Always log to prove logging works
+  await logger.info("TEST: Persistent startup log — Qdrant should receive this");
+
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
-  if (success) {
-    await logger.info("TypeScript compilation succeeded — nothing to do.");
-  } else {
+  // FORCE error path every run for test
+  let errorMemories: ErrorMemory[] = [];
+  if (!success) {
     await logger.warn("TypeScript errors detected", { error_output: tscOutput });
+    errorMemories = parseErrorMemories(tscOutput);
+  } else {
+    await logger.info("TypeScript compilation succeeded — forcing simulated error for Qdrant test");
+    errorMemories = [{
+      bot_name: "coordinator",
+      timestamp: new Date().toISOString(),
+      message: "Simulated error for Qdrant test — no real TS issues",
+      context: { test: "forced" },
+    }];
+  }
 
-    // FORCE ERROR PATH TEST — simulate failure in error branch
-    const errorMemories: ErrorMemory[] = parseErrorMemories(tscOutput);
-    // TEMP: force a simulated error memory if none (to trigger logging/PR)
-    if (errorMemories.length === 0) {
-      errorMemories.push({
-        bot_name: "coordinator",
-        timestamp: new Date().toISOString(),
-        message: "Simulated TS error for test",
-        context: { test: "forced" },
-      });
-    }
+  // 2. Persist error memories — this triggers Qdrant upsert every run
+  for (const mem of errorMemories) {
+    await logErrorMemory(mem).catch((err) =>
+      console.error("logErrorMemory failed (continuing):", err.message)
+    );
+  }
 
-    for (const mem of errorMemories) {
-      await logErrorMemory(mem).catch((err) =>
-        console.error("logErrorMemory failed (continuing):", err.message)
-      );
-    }
-
-    // 3. Build fix prompt
+  // 3. Build fix prompt & PR (only if errors)
+  if (errorMemories.length > 0) {
     const { systemPrompt, userPrompt } = buildFixPrompt(tscOutput, errorMemories);
     await logger.info("Fix prompt constructed", {
       system_prompt_length: systemPrompt.length,
@@ -113,7 +116,6 @@ async function run(): Promise<void> {
       error_count: errorMemories.length,
     });
 
-    // 4. Write prompts to disk
     const promptDir = path.join(os.tmpdir(), "openclaw-prompts");
     fs.mkdirSync(promptDir, { recursive: true });
     const systemPath = path.join(promptDir, "system.txt");
@@ -122,7 +124,6 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch — branchName always string
     const branchName = `fix/tsc-errors-${Date.now()}`;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
@@ -135,7 +136,6 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR
     try {
       const pr = await createPullRequest(
         OWNER,
