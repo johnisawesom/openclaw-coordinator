@@ -78,8 +78,8 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // TEMP: uncomment ONLY AFTER build succeeds, to force error path test
-  throw new Error("Simulated coordinator crash to test logging + PR creation");
+  // TEMP: uncomment ONLY to force error path test (after build succeeds)
+  // throw new Error("Simulated coordinator crash to test logging + PR creation");
 
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
@@ -115,15 +115,16 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
-    // 5. Create fix branch — with null guard
+    // 5. Create fix branch
     let branchName: string | null = null;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
       branchName = `fix/tsc-errors-${Date.now()}`;
       if (!branchName) {
-        throw new Error("branchName generation failed (null)");
+        throw new Error("branchName was falsy after generation");
       }
-      await createBranch(OWNER, REPO, branchName, baseSha);
+      // Explicit non-null assertion after guard — tsc should accept this
+      await createBranch(OWNER, REPO, branchName!, baseSha);
       await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
     } catch (err: any) {
       await logger.error("Failed to create fix branch", {
@@ -132,14 +133,15 @@ async function run(): Promise<void> {
       });
     }
 
-    // 6. Open draft PR — only if branchName is non-null
+    // 6. Open draft PR
     if (branchName) {
       try {
+        // branchName is string here
         const pr = await createPullRequest(
           OWNER,
           REPO,
           `[OpenClaw] Fix TypeScript compilation errors (${errorMemories.length} errors)`,
-          branchName,  // type-narrowed to string here
+          branchName,
           "main",
           `## Automated Fix\n\nThis PR was opened by the OpenClaw Coordinator to address ` +
             `${errorMemories.length} TypeScript compiler error(s).\n\n### Errors\n\n\`\`\`\n` +
@@ -156,14 +158,14 @@ async function run(): Promise<void> {
         });
       }
     } else {
-      await logger.warn("Skipping PR creation — branchName was null");
+      await logger.warn("Skipping PR — branchName was null or falsy");
     }
   }
 
   await logger.info("Coordinator run complete");
 
-  // Keep alive temporarily so Fly proxy sees /health
-  await new Promise((resolve) => setTimeout(resolve, 30000)); // 30 seconds
+  // Keep alive temporarily
+  await new Promise((resolve) => setTimeout(resolve, 30000));
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
