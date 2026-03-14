@@ -78,10 +78,7 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // FORCE RUNTIME ERROR PATH — this will trigger Qdrant logging + GitHub PR attempt
-  throw new Error("Simulated runtime crash to test logging + PR creation");
-
-  // 1. Run tsc (never reached)
+  // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
@@ -90,13 +87,25 @@ async function run(): Promise<void> {
   } else {
     await logger.warn("TypeScript errors detected", { error_output: tscOutput });
 
+    // FORCE ERROR PATH TEST — simulate failure in error branch
     const errorMemories: ErrorMemory[] = parseErrorMemories(tscOutput);
+    // TEMP: force a simulated error memory if none (to trigger logging/PR)
+    if (errorMemories.length === 0) {
+      errorMemories.push({
+        bot_name: "coordinator",
+        timestamp: new Date().toISOString(),
+        message: "Simulated TS error for test",
+        context: { test: "forced" },
+      });
+    }
+
     for (const mem of errorMemories) {
       await logErrorMemory(mem).catch((err) =>
         console.error("logErrorMemory failed (continuing):", err.message)
       );
     }
 
+    // 3. Build fix prompt
     const { systemPrompt, userPrompt } = buildFixPrompt(tscOutput, errorMemories);
     await logger.info("Fix prompt constructed", {
       system_prompt_length: systemPrompt.length,
@@ -104,6 +113,7 @@ async function run(): Promise<void> {
       error_count: errorMemories.length,
     });
 
+    // 4. Write prompts to disk
     const promptDir = path.join(os.tmpdir(), "openclaw-prompts");
     fs.mkdirSync(promptDir, { recursive: true });
     const systemPath = path.join(promptDir, "system.txt");
@@ -112,6 +122,7 @@ async function run(): Promise<void> {
     fs.writeFileSync(userPath, userPrompt, "utf-8");
     await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
 
+    // 5. Create fix branch — branchName always string
     const branchName = `fix/tsc-errors-${Date.now()}`;
     try {
       const baseSha = await getDefaultBranchSha(OWNER, REPO);
@@ -124,6 +135,7 @@ async function run(): Promise<void> {
       });
     }
 
+    // 6. Open draft PR
     try {
       const pr = await createPullRequest(
         OWNER,
