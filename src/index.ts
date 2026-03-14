@@ -79,7 +79,7 @@ async function run(): Promise<void> {
   const cwd = process.cwd();
 
   // TEMP: force runtime error path (uncomment to test Qdrant + PR)
-  // throw new Error("Simulated runtime crash to test logging + PR creation");
+  throw new Error("Simulated runtime crash to test logging + PR creation");
 
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
