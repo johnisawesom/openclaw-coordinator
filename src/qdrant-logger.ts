@@ -1,6 +1,5 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 
-// ── Types (unchanged) ─────────────────────────────────────────────────────
 export interface ErrorMemory {
   bot_name: string;
   timestamp: string;
@@ -22,120 +21,128 @@ export interface StructuredLogEntry {
   context?: Record<string, unknown>;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────
 const COLLECTION_NAME = "coordinator_logs";
-const VECTOR_SIZE = 1536;
 const VECTOR_NAME = "dense";
-const PROOF_MARKER = "QDRANT_LOGGER_v20260314-02_PROOF";
+const VECTOR_SIZE = 1536;
 
-// ── Singleton + bootstrap with full diagnostics ───────────────────────────
-let _client: QdrantClient | null = null;
-let _vectorFormat: "named" | "plain" = "named"; // default to your dashboard
+let client: QdrantClient | null = null;
 
 async function getClient(): Promise<QdrantClient | null> {
-  if (_client) return _client;
+  if (client) return client;
 
   const url = process.env.QDRANT_URL;
   const apiKey = process.env.QDRANT_API_KEY;
+
   if (!url || !apiKey) {
-    console.error("[qdrant-logger] CRITICAL: Missing QDRANT_URL or QDRANT_API_KEY");
+    console.error("[qdrant-logger] Missing QDRANT_URL or QDRANT_API_KEY");
     return null;
   }
 
+  client = new QdrantClient({ url, apiKey });
+  console.log("[qdrant-logger] Client created");
+
   try {
-    _client = new QdrantClient({ url, apiKey });
-    console.log(`[qdrant-logger] Client initialized (v20260314-02)`);
-
-    // Inspect real collection
-    let collectionInfo;
-    try {
-      collectionInfo = await _client.getCollection(COLLECTION_NAME);
-      console.log("[qdrant-logger] Collection exists. Config:", JSON.stringify(collectionInfo.config?.params?.vectors));
-      // Auto-detect format
-      if (collectionInfo.config?.params?.vectors && typeof collectionInfo.config.params.vectors === "object" && VECTOR_NAME in collectionInfo.config.params.vectors) {
-        _vectorFormat = "named";
-      } else {
-        _vectorFormat = "plain";
-      }
-    } catch (err: any) {
-      if (err?.status === 404) {
-        console.log(`[qdrant-logger] Collection missing → creating with NAMED "${VECTOR_NAME}"`);
-        await _client.createCollection(COLLECTION_NAME, {
-          vectors: {
-            [VECTOR_NAME]: { size: VECTOR_SIZE, distance: "Cosine" },
-          },
-        });
-        _vectorFormat = "named";
-        console.log("[qdrant-logger] Collection created (named mode)");
-      } else {
-        console.error("[qdrant-logger] Collection check failed:", err.message || err);
-        return null;
-      }
-    }
-
-    return _client;
+    await client.getCollection(COLLECTION_NAME);
+    console.log("[qdrant-logger] Collection exists");
   } catch (err: any) {
-    console.error("[qdrant-logger] Client creation FAILED:", err.message || err);
-    return null;
+    if (err.status === 404) {
+      console.log("[qdrant-logger] Creating collection");
+      await client.createCollection(COLLECTION_NAME, {
+        vectors: {
+          [VECTOR_NAME]: {
+            size: VECTOR_SIZE,
+            distance: "Cosine"
+          }
+        }
+      });
+      console.log("[qdrant-logger] Collection created");
+    } else {
+      console.error("[qdrant-logger] Collection check failed:", err.message);
+      client = null;
+      return null;
+    }
   }
+
+  return client;
 }
 
-// ── Safe ID ───────────────────────────────────────────────────────────────
-function getId(): string {
-  return `proof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
+async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
+  const cl = await getClient();
+  if (!cl) return false;
 
-// ── Upsert + VERIFY (the part that proves it works) ───────────────────────
-async function upsert(payload: Record<string, unknown>): Promise<boolean> {
-  const client = await getClient();
-  if (!client) {
-    console.warn("[qdrant-logger] No client — skipping");
-    return false;
-  }
-
-  const dummyVector = new Array(VECTOR_SIZE).fill(0.0);
-  const pointId = getId();
-
-  const vectorPayload = _vectorFormat === "named"
-    ? { [VECTOR_NAME]: dummyVector }
-    : dummyVector;
+  const vector = new Array(VECTOR_SIZE).fill(0);
+  const id = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 
   try {
-    await client.upsert(COLLECTION_NAME, {
+    await cl.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
-        id: pointId,
-        vector: vectorPayload,
-        payload: { ...payload, proof_marker: PROOF_MARKER },
-      }],
+        id,
+        vector: { [VECTOR_NAME]: vector },
+        payload
+      }]
     });
-    console.log(`[qdrant-logger] Upsert OK (ID: ${pointId}, format: ${_vectorFormat})`);
+    console.log("[qdrant-logger] Upsert OK id:", id);
 
-    // PROOF: immediately retrieve it
-    const retrieved = await client.retrieve(COLLECTION_NAME, { ids: [pointId] });
-    if (retrieved.length > 0) {
-      console.log(`[qdrant-logger] VERIFY SUCCESS — point IS in Qdrant (ID: ${pointId})`);
+    const res = await cl.retrieve(COLLECTION_NAME, { ids: [id] });
+    if (res.length > 0) {
+      console.log("[qdrant-logger] VERIFY SUCCESS - point exists");
       return true;
-    } else {
-      console.error(`[qdrant-logger] VERIFY FAILED — upsert claimed success but retrieve returned nothing`);
-      return false;
     }
+    console.error("[qdrant-logger] VERIFY FAIL - point not found after upsert");
+    return false;
   } catch (err: any) {
-    console.error("[qdrant-logger] Upsert FAILED:", err.message || err, "status:", err.status);
+    console.error("[qdrant-logger] Upsert failed:", err.message, err.status);
     return false;
   }
 }
 
-// ── Rest of functions (logToQdrant, logErrorMemory, logger) unchanged except extra proof logging
+export async function logErrorMemory(mem: ErrorMemory): Promise<void> {
+  const payload = {
+    level: "error",
+    message: mem.message,
+    timestamp: mem.timestamp,
+    bot_name: mem.bot_name,
+    stack: mem.stack || "",
+    context: mem.context || {}
+  };
+  await upsertPoint(payload);
+}
+
 export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
-  const payload = { /* same as before */ ... };
-  const success = await upsert(payload);
-  if (!success) console.log(`[${entry.level.toUpperCase()}] FALLBACK: ${entry.message}`);
+  const payload = {
+    level: entry.level,
+    message: entry.message,
+    timestamp: entry.timestamp,
+    bot_name: entry.bot_name || "coordinator",
+    run_id: entry.run_id || "",
+    pr_number: entry.pr_number || null,
+    repo: entry.repo || "",
+    context: entry.context || {}
+  };
+  const ok = await upsertPoint(payload);
+  if (!ok) {
+    console.log(`[${entry.level.toUpperCase()}] ${entry.message} (qdrant failed)`);
+  }
 }
 
-export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
-  const payload = { /* same as before */ ... };
-  await upsert(payload);
-}
+export const logger = {
+  info: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "info", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+  warn: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "warn", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+  error: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "error", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+  debug: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
+};
 
-export const logger = { /* same as before */ };
+// Startup proof test
+(async () => {
+  console.log("[qdrant-logger] Startup test running");
+  await logErrorMemory({
+    bot_name: "coordinator",
+    timestamp: new Date().toISOString(),
+    message: "PROOF - qdrant logger working - check dashboard point count"
+  });
+})();
