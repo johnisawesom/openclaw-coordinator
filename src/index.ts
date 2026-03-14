@@ -78,84 +78,33 @@ async function run(): Promise<void> {
   await logger.info("OpenClaw Coordinator starting up", { owner: OWNER, repo: REPO });
   const cwd = process.cwd();
 
-  // TEST: Always log to prove logging works
-  await logger.info("TEST: Persistent startup log — Qdrant should receive this");
+  // PROOF MARKER — if this appears in fly logs, this code is live
+  await logger.info("PROOF MARKER 2026-03-14: Qdrant logging FORCED every run");
+
+  // Force simulated error memory EVERY run to trigger upsert
+  const forcedMemory: ErrorMemory = {
+    bot_name: "coordinator",
+    timestamp: new Date().toISOString(),
+    message: "Simulated error to force Qdrant upsert test",
+    context: { test: "forced-every-run" },
+  };
+  await logErrorMemory(forcedMemory).catch((err) =>
+    console.error("Forced logErrorMemory failed:", err.message)
+  );
 
   // 1. Run tsc
   await logger.info("Running tsc --noEmit …");
   const { success, output: tscOutput } = runTsc(cwd);
 
-  // FORCE error path every run for test
-  let errorMemories: ErrorMemory[] = [];
-  if (!success) {
-    await logger.warn("TypeScript errors detected", { error_output: tscOutput });
-    errorMemories = parseErrorMemories(tscOutput);
+  if (success) {
+    await logger.info("TypeScript compilation succeeded — nothing to do.");
   } else {
-    await logger.info("TypeScript compilation succeeded — forcing simulated error for Qdrant test");
-    errorMemories = [{
-      bot_name: "coordinator",
-      timestamp: new Date().toISOString(),
-      message: "Simulated error for Qdrant test — no real TS issues",
-      context: { test: "forced" },
-    }];
-  }
-
-  // 2. Persist error memories — this triggers Qdrant upsert every run
-  for (const mem of errorMemories) {
-    await logErrorMemory(mem).catch((err) =>
-      console.error("logErrorMemory failed (continuing):", err.message)
-    );
-  }
-
-  // 3. Build fix prompt & PR (only if errors)
-  if (errorMemories.length > 0) {
-    const { systemPrompt, userPrompt } = buildFixPrompt(tscOutput, errorMemories);
-    await logger.info("Fix prompt constructed", {
-      system_prompt_length: systemPrompt.length,
-      user_prompt_length: userPrompt.length,
-      error_count: errorMemories.length,
-    });
-
-    const promptDir = path.join(os.tmpdir(), "openclaw-prompts");
-    fs.mkdirSync(promptDir, { recursive: true });
-    const systemPath = path.join(promptDir, "system.txt");
-    const userPath = path.join(promptDir, "user.txt");
-    fs.writeFileSync(systemPath, systemPrompt, "utf-8");
-    fs.writeFileSync(userPath, userPrompt, "utf-8");
-    await logger.info("Prompts written to disk", { system_path: systemPath, user_path: userPath });
-
-    const branchName = `fix/tsc-errors-${Date.now()}`;
-    try {
-      const baseSha = await getDefaultBranchSha(OWNER, REPO);
-      await createBranch(OWNER, REPO, branchName, baseSha);
-      await logger.info("Fix branch created", { branch: branchName, base_sha: baseSha });
-    } catch (err: any) {
-      await logger.error("Failed to create fix branch", {
-        error: err.message,
-        stack: err.stack,
-      });
-    }
-
-    try {
-      const pr = await createPullRequest(
-        OWNER,
-        REPO,
-        `[OpenClaw] Fix TypeScript compilation errors (${errorMemories.length} errors)`,
-        branchName,
-        "main",
-        `## Automated Fix\n\nThis PR was opened by the OpenClaw Coordinator to address ` +
-          `${errorMemories.length} TypeScript compiler error(s).\n\n### Errors\n\n\`\`\`\n` +
-          `${tscOutput.slice(0, 3000)}\n\`\`\``
+    await logger.warn("TypeScript errors detected", { error_output: tscOutput });
+    const errorMemories = parseErrorMemories(tscOutput);
+    for (const mem of errorMemories) {
+      await logErrorMemory(mem).catch((err) =>
+        console.error("logErrorMemory failed (continuing):", err.message)
       );
-      await logger.info("Draft PR created", {
-        pr_number: (pr as any).number,
-        pr_url: (pr as any).html_url,
-      });
-    } catch (err: any) {
-      await logger.error("Failed to create draft PR", {
-        error: err.message,
-        stack: err.stack,
-      });
     }
   }
 
@@ -171,7 +120,7 @@ run()
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     }).catch(() => console.error("Logger failed during crash logging"));
-    console.error("[CRASH] Coordinator threw error but server stays alive for Fly health check");
+    console.error("[CRASH] Coordinator threw error but server stays alive");
   })
   .finally(() => {
     console.log("[shutdown] Run finished — keeping server alive for Fly health check");
