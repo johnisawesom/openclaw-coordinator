@@ -224,22 +224,3 @@ export {
   searchSimilarLogs,
 };
 export type { ErrorMemory };
-```
-
----
-
-**Suggested branch name:** `fix-ts2484-error-memory-20260317`
-
-**Commit message:** `fix(qdrant-logger): resolve TS2484 ErrorMemory export conflict for clean-slate rebuild`
-
-**Git diff summary:**
-```
-- @ts-ignore + import { pipeline } from "@xenova/transformers"   [removed]
-- embedder state var + getEmbedder() + embedText()               [removed]
-- interface ErrorMemory { ... } export keyword                   [moved to: export type { ErrorMemory } at bottom]
-- export { ..., ErrorMemory } in bottom block                    [split: type-only export type { ErrorMemory }]
-- generateVariedVector(seed)                                     [added — deterministic LCG hash, L2-normalised]
-- All catch (err: any)                                           [changed to catch (err: unknown) with safe cast]
-- process.env.BOT_NAME                                           [changed to process.env["BOT_NAME"] for nodenext]
-- payload.message / payload.status bare property access          [changed to (err as any)?.status pattern]
-- Duplicate / scattered export statements                        [consolidated to single block at EOF]
