@@ -1,5 +1,6 @@
-import { QdrantClient } from "@qdrant/js-client-rest";
+// @ts-ignore - no types for @xenova/transformers (JS-only package)
 import { pipeline } from "@xenova/transformers";
+import { QdrantClient } from "@qdrant/js-client-rest";
 
 export interface ErrorMemory {
   bot_name: string;
@@ -24,7 +25,7 @@ export interface StructuredLogEntry {
 
 const COLLECTION_NAME = "coordinator_logs";
 const VECTOR_NAME = "dense";
-const VECTOR_SIZE = 1536; // pad to 1536
+const VECTOR_SIZE = 1536;
 
 let client: QdrantClient | null = null;
 let embedder: any = null;
@@ -45,16 +46,15 @@ async function embedText(text: string): Promise<number[]> {
     const output = await model(text, { pooling: "mean", normalize: true });
     const embedding = Array.from(output.data as Float32Array);
 
-    // Pad to 1536 if needed (MiniLM is 384)
+    // Pad to 1536
     while (embedding.length < VECTOR_SIZE) {
       embedding.push(0);
     }
 
-    console.log("[qdrant-logger] Embedded:", text.slice(0, 50) + "... (dim:", embedding.length, ")");
+    console.log("[qdrant-logger] Embedded text:", text.slice(0, 50) + "...");
     return embedding;
   } catch (err: any) {
     console.error("[qdrant-logger] Embedding failed:", err.message);
-    // Fallback zero vector
     return new Array(VECTOR_SIZE).fill(0);
   }
 }
@@ -155,4 +155,47 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
 }
 
 // Explicit exports for other files
-export { logErrorMemory, logToQdrant, logger, searchSimilarLogs, ErrorMemory };
+export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
+  const payload = {
+    level: "error",
+    message: memory.message,
+    timestamp: memory.timestamp,
+    bot_name: memory.bot_name,
+    stack: memory.stack ?? "",
+    context: memory.context ?? {}
+  };
+  await upsertPoint(payload);
+}
+
+export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
+  const payload = {
+    level: entry.level,
+    message: entry.message,
+    timestamp: entry.timestamp,
+    bot_name: entry.bot_name ?? (process.env.BOT_NAME || "coordinator"),
+    run_id: entry.run_id ?? "",
+    pr_number: entry.pr_number ?? null,
+    repo: entry.repo ?? "",
+    context: entry.context ?? {}
+  };
+  const success = await upsertPoint(payload);
+  if (!success) {
+    console.log(`[${entry.level.toUpperCase()}] ${entry.message} (Qdrant failed)`);
+  }
+}
+
+export const logger = {
+  info: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "info", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+
+  warn: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "warn", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+
+  error: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "error", message: msg, timestamp: new Date().toISOString(), context: ctx }),
+
+  debug: (msg: string, ctx?: Record<string, unknown>) =>
+    logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
+};
+
+export { ErrorMemory, searchSimilarLogs };
