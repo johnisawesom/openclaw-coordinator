@@ -1,5 +1,5 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
-import Anthropic from "@anthropic-ai/sdk";
+import { pipeline } from "@xenova/transformers";
 
 export interface ErrorMemory {
   bot_name: string;
@@ -24,54 +24,39 @@ export interface StructuredLogEntry {
 
 const COLLECTION_NAME = "coordinator_logs";
 const VECTOR_NAME = "dense";
-const VECTOR_SIZE = 1536;
+const VECTOR_SIZE = 1536; // pad to 1536
 
 let client: QdrantClient | null = null;
-let anthropic: Anthropic | null = null;
+let embedder: any = null;
 let pointIdCounter = Date.now();
 
-async function getAnthropic(): Promise<Anthropic> {
-  if (anthropic) return anthropic;
+async function getEmbedder() {
+  if (embedder) return embedder;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.error("[qdrant-logger] Missing ANTHROPIC_API_KEY");
-    throw new Error("Missing ANTHROPIC_API_KEY");
-  }
-
-  anthropic = new Anthropic({ apiKey });
-  return anthropic;
+  console.log("[qdrant-logger] Loading embedding model...");
+  embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+  console.log("[qdrant-logger] Embedding model loaded");
+  return embedder;
 }
 
 async function embedText(text: string): Promise<number[]> {
   try {
-    const api = await getAnthropic();
-    // Use Claude Haiku for cheap/fast embedding (1536 dim)
-    const response = await api.embeddings.create({
-      model: "claude-3-haiku-20240307",
-      input: text,
-    });
+    const model = await getEmbedder();
+    const output = await model(text, { pooling: "mean", normalize: true });
+    const embedding = Array.from(output.data as Float32Array);
 
-    const embedding = response.data[0].embedding;
-    if (embedding.length !== VECTOR_SIZE) {
-      throw new Error(`Embedding dim mismatch: got ${embedding.length}, expected ${VECTOR_SIZE}`);
+    // Pad to 1536 if needed (MiniLM is 384)
+    while (embedding.length < VECTOR_SIZE) {
+      embedding.push(0);
     }
 
-    console.log("[qdrant-logger] Embedded text:", text.slice(0, 50) + "...");
+    console.log("[qdrant-logger] Embedded:", text.slice(0, 50) + "... (dim:", embedding.length, ")");
     return embedding;
   } catch (err: any) {
     console.error("[qdrant-logger] Embedding failed:", err.message);
-    // Fallback to varied dummy
-    return generateVariedVector(Date.now());
+    // Fallback zero vector
+    return new Array(VECTOR_SIZE).fill(0);
   }
-}
-
-function generateVariedVector(seed: number): number[] {
-  const vector = new Array(VECTOR_SIZE);
-  for (let i = 0; i < VECTOR_SIZE; i++) {
-    vector[i] = Math.sin(i * 0.017 + seed * 0.2) * 0.6 + 0.4;
-  }
-  return vector;
 }
 
 async function getClient(): Promise<QdrantClient | null> {
@@ -114,7 +99,7 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  const message = payload.message as string || "no message";
+  const message = (payload.message as string) || "no message";
   const vector = await embedText(message);
 
   const pointId = pointIdCounter++;
@@ -154,7 +139,7 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
       params: { hnsw_ef: 256 }
     });
 
-    console.log(`[qdrant-logger] Semantic search for "${queryMessage.slice(0, 50)}...": found ${results.length} matches`);
+    console.log(`[qdrant-logger] Semantic search for "${queryMessage.slice(0, 50)}...": ${results.length} matches`);
 
     results.forEach((r: any, i: number) => {
       const payload = r.payload || {};
@@ -169,7 +154,5 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
   }
 }
 
-// Exports
+// Explicit exports for other files
 export { logErrorMemory, logToQdrant, logger, searchSimilarLogs, ErrorMemory };
-
-
