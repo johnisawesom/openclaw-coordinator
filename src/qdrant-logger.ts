@@ -46,12 +46,11 @@ async function embedText(text: string): Promise<number[]> {
     const output = await model(text, { pooling: "mean", normalize: true });
     const embedding = Array.from(output.data as Float32Array);
 
-    // Pad to 1536
     while (embedding.length < VECTOR_SIZE) {
       embedding.push(0);
     }
 
-    console.log("[qdrant-logger] Embedded text:", text.slice(0, 50) + "...");
+    console.log("[qdrant-logger] Embedded:", text.slice(0, 50) + "...");
     return embedding;
   } catch (err: any) {
     console.error("[qdrant-logger] Embedding failed:", err.message);
@@ -154,7 +153,7 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
   }
 }
 
-// Explicit exports for other files
+// Explicit exports - NO duplicate ErrorMemory
 export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
   const payload = {
     level: "error",
@@ -198,4 +197,4 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-export { ErrorMemory, searchSimilarLogs };
+export { searchSimilarLogs };
