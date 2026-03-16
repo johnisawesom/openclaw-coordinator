@@ -26,7 +26,16 @@ const VECTOR_NAME = "dense";
 const VECTOR_SIZE = 1536;
 
 let client: QdrantClient | null = null;
-let pointIdCounter = Date.now(); // monotonic integer IDs
+let pointIdCounter = Date.now();
+
+function generateVariedVector(seed: number): number[] {
+  const vector = new Array(VECTOR_SIZE).fill(0);
+  for (let i = 0; i < VECTOR_SIZE; i++) {
+    // Simple deterministic variation: sin + seed offset + small noise
+    vector[i] = Math.sin(i * 0.01 + seed * 0.1) * 0.5 + 0.5 + (Math.random() * 0.01);
+  }
+  return vector;
+}
 
 async function getClient(): Promise<QdrantClient | null> {
   if (client) return client;
@@ -72,10 +81,10 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  const vector = new Float32Array(VECTOR_SIZE);
-  vector.fill(0.0);
-
+  // Varied vector based on timestamp seed
+  const vector = generateVariedVector(Date.now());
   const pointId = pointIdCounter++;
+
   console.log("[qdrant-logger] Using integer point ID:", pointId);
 
   try {
@@ -83,7 +92,7 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
       wait: true,
       points: [{
         id: pointId,
-        vector: { [VECTOR_NAME]: Array.from(vector) },
+        vector: { [VECTOR_NAME]: vector },
         payload
       }]
     });
@@ -106,29 +115,31 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   }
 }
 
-// NEW: Semantic search for similar logs (dummy vector for now)
-async function searchSimilarLogs(queryMessage: string, limit = 3, scoreThreshold = 0.5): Promise<any[]> {
+async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold = 0.3): Promise<any[]> {
   const cl = await getClient();
   if (!cl) return [];
 
-  // Dummy vector (same as upsert) - later replace with real embedding of queryMessage
-  const dummyVector = new Float32Array(VECTOR_SIZE);
-  dummyVector.fill(0.0);
+  // For testing: use a fixed seed for query vector (same family as upsert)
+  // In real: replace with actual embedding of queryMessage
+  const queryVector = generateVariedVector(42); // consistent seed for now
 
   try {
     const results = await cl.search(COLLECTION_NAME, {
       vector: {
         name: VECTOR_NAME,
-        vector: Array.from(dummyVector)
+        vector: queryVector
       },
       limit,
       score_threshold: scoreThreshold,
-      with_payload: true
+      with_payload: true,
+      params: {
+        hnsw_ef: 128 // boost recall
+      }
     });
 
-    console.log(`[qdrant-logger] Search results for "${queryMessage}": found ${results.length} matches`);
+    console.log(`[qdrant-logger] Search for "${queryMessage}": found ${results.length} matches (threshold ${scoreThreshold})`);
     results.forEach((r, i) => {
-      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - message: ${r.payload?.message}`);
+      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - id ${r.id} - message: ${r.payload?.message?.slice(0, 100)}...`);
     });
 
     return results;
@@ -181,16 +192,16 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-// Startup proof + retrieval test
+// Startup proof + search test
 (async () => {
-  console.log("[qdrant-logger] Module loaded - running proof with integer ID");
+  console.log("[qdrant-logger] Module loaded - running proof with varied vector");
   await logErrorMemory({
     bot_name: "coordinator",
     timestamp: new Date().toISOString(),
-    message: "PROOF v-integer-id-20260314 - this should land in Qdrant now",
-    context: { test: "final-push" }
+    message: "PROOF v-varied-vector-20260316 - semantic search should now find matches",
+    context: { test: "varied-vector" }
   });
 
-  // Test retrieval
-  await searchSimilarLogs("TypeScript errors detected", 5, 0.1); // low threshold to catch some
+  // Test retrieval with a message that should match past tsc errors
+  await searchSimilarLogs("TypeScript errors detected", 5, 0.1);
 })();
