@@ -1,4 +1,5 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
+import Anthropic from "@anthropic-ai/sdk";
 
 export interface ErrorMemory {
   bot_name: string;
@@ -26,7 +27,44 @@ const VECTOR_NAME = "dense";
 const VECTOR_SIZE = 1536;
 
 let client: QdrantClient | null = null;
+let anthropic: Anthropic | null = null;
 let pointIdCounter = Date.now();
+
+async function getAnthropic(): Promise<Anthropic> {
+  if (anthropic) return anthropic;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error("[qdrant-logger] Missing ANTHROPIC_API_KEY");
+    throw new Error("Missing ANTHROPIC_API_KEY");
+  }
+
+  anthropic = new Anthropic({ apiKey });
+  return anthropic;
+}
+
+async function embedText(text: string): Promise<number[]> {
+  try {
+    const api = await getAnthropic();
+    // Use Claude Haiku for cheap/fast embedding (1536 dim)
+    const response = await api.embeddings.create({
+      model: "claude-3-haiku-20240307",
+      input: text,
+    });
+
+    const embedding = response.data[0].embedding;
+    if (embedding.length !== VECTOR_SIZE) {
+      throw new Error(`Embedding dim mismatch: got ${embedding.length}, expected ${VECTOR_SIZE}`);
+    }
+
+    console.log("[qdrant-logger] Embedded text:", text.slice(0, 50) + "...");
+    return embedding;
+  } catch (err: any) {
+    console.error("[qdrant-logger] Embedding failed:", err.message);
+    // Fallback to varied dummy
+    return generateVariedVector(Date.now());
+  }
+}
 
 function generateVariedVector(seed: number): number[] {
   const vector = new Array(VECTOR_SIZE);
@@ -76,7 +114,9 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  const vector = generateVariedVector(Date.now());
+  const message = payload.message as string || "no message";
+  const vector = await embedText(message);
+
   const pointId = pointIdCounter++;
 
   try {
@@ -96,11 +136,11 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   }
 }
 
-async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold = 0.05): Promise<any[]> {
+async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold = 0.6): Promise<any[]> {
   const cl = await getClient();
   if (!cl) return [];
 
-  const queryVector = generateVariedVector(12345);
+  const queryVector = await embedText(queryMessage);
 
   try {
     const results = await cl.search(COLLECTION_NAME, {
@@ -111,15 +151,15 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
       limit,
       score_threshold: scoreThreshold,
       with_payload: true,
-      params: { hnsw_ef: 128 }
+      params: { hnsw_ef: 256 }
     });
 
-    console.log(`[qdrant-logger] Search for "${queryMessage}": found ${results.length} matches`);
+    console.log(`[qdrant-logger] Semantic search for "${queryMessage.slice(0, 50)}...": found ${results.length} matches`);
 
     results.forEach((r: any, i: number) => {
       const payload = r.payload || {};
       const msg = 'message' in payload ? payload.message : '(no message)';
-      console.log(`  Match ${i+1}: score=${r.score.toFixed(4)} | ID=${r.id} | "${msg.slice(0, 90)}..."`);
+      console.log(`  Match ${i+1}: score=${r.score.toFixed(4)} | ID=${r.id} | "${msg.slice(0, 80)}..."`);
     });
 
     return results;
@@ -129,48 +169,7 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
   }
 }
 
-export async function logErrorMemory(memory: ErrorMemory): Promise<void> {
-  const payload = {
-    level: "error",
-    message: memory.message,
-    timestamp: memory.timestamp,
-    bot_name: memory.bot_name,
-    stack: memory.stack ?? "",
-    context: memory.context ?? {}
-  };
-  await upsertPoint(payload);
-}
+// Exports
+export { logErrorMemory, logToQdrant, logger, searchSimilarLogs, ErrorMemory };
 
-export async function logToQdrant(entry: StructuredLogEntry): Promise<void> {
-  const payload = {
-    level: entry.level,
-    message: entry.message,
-    timestamp: entry.timestamp,
-    bot_name: entry.bot_name ?? (process.env.BOT_NAME || "coordinator"),
-    run_id: entry.run_id ?? "",
-    pr_number: entry.pr_number ?? null,
-    repo: entry.repo ?? "",
-    context: entry.context ?? {}
-  };
-  const success = await upsertPoint(payload);
-  if (!success) {
-    console.log(`[${entry.level.toUpperCase()}] ${entry.message} (Qdrant failed)`);
-  }
-}
 
-export const logger = {
-  info: (msg: string, ctx?: Record<string, unknown>) =>
-    logToQdrant({ level: "info", message: msg, timestamp: new Date().toISOString(), context: ctx }),
-
-  warn: (msg: string, ctx?: Record<string, unknown>) =>
-    logToQdrant({ level: "warn", message: msg, timestamp: new Date().toISOString(), context: ctx }),
-
-  error: (msg: string, ctx?: Record<string, unknown>) =>
-    logToQdrant({ level: "error", message: msg, timestamp: new Date().toISOString(), context: ctx }),
-
-  debug: (msg: string, ctx?: Record<string, unknown>) =>
-    logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
-};
-
-// Export everything explicitly
-export { upsertPoint, searchSimilarLogs, generateVariedVector };
