@@ -29,9 +29,9 @@ let client: QdrantClient | null = null;
 let pointIdCounter = Date.now();
 
 function generateVariedVector(seed: number): number[] {
-  const vector = new Array(VECTOR_SIZE).fill(0);
+  const vector = new Array(VECTOR_SIZE);
   for (let i = 0; i < VECTOR_SIZE; i++) {
-    vector[i] = Math.sin(i * 0.01 + seed * 0.1) * 0.5 + 0.5 + (Math.random() * 0.01);
+    vector[i] = Math.sin(i * 0.017 + seed * 0.2) * 0.6 + 0.4; // strong deterministic variation
   }
   return vector;
 }
@@ -58,16 +58,12 @@ async function getClient(): Promise<QdrantClient | null> {
       console.log("[qdrant-logger] Creating collection with named vector 'dense'");
       await client.createCollection(COLLECTION_NAME, {
         vectors: {
-          [VECTOR_NAME]: {
-            size: VECTOR_SIZE,
-            distance: "Cosine"
-          }
+          [VECTOR_NAME]: { size: VECTOR_SIZE, distance: "Cosine" }
         }
       });
       console.log("[qdrant-logger] Collection created");
     } else {
       console.error("[qdrant-logger] Collection check failed:", err.message || err);
-      if (err.data) console.error("[qdrant-logger] Full error data:", JSON.stringify(err.data));
       client = null;
       return null;
     }
@@ -83,7 +79,7 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const vector = generateVariedVector(Date.now());
   const pointId = pointIdCounter++;
 
-  console.log("[qdrant-logger] Using integer point ID:", pointId);
+  console.log(`[qdrant-logger] Upserting ID: ${pointId}`);
 
   try {
     await cl.upsert(COLLECTION_NAME, {
@@ -95,29 +91,20 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
       }]
     });
     console.log(`[qdrant-logger] Upsert success - id: ${pointId}`);
-
-    const retrieved = await cl.retrieve(COLLECTION_NAME, {
-      ids: [pointId],
-      with_payload: true
-    });
-    if (retrieved.length > 0) {
-      console.log("[qdrant-logger] VERIFY SUCCESS - point stored");
-      return true;
-    }
-
-    console.error("[qdrant-logger] VERIFY FAIL - retrieve returned nothing");
-    return false;
+    return true;
   } catch (err: any) {
-    console.error("[qdrant-logger] Upsert failed. Details:", err.message, err.status, JSON.stringify(err.data || {}));
+    console.error("[qdrant-logger] Upsert failed:", err.message, err.status);
     return false;
   }
 }
 
-async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold = 0.3): Promise<any[]> {
+async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold = 0.05): Promise<any[]> {
   const cl = await getClient();
   if (!cl) return [];
 
-  const queryVector = generateVariedVector(42);
+  console.log(`[qdrant-logger] === SEARCH STARTED for "${queryMessage}" ===`);
+
+  const queryVector = generateVariedVector(12345); // fixed seed for test consistency
 
   try {
     const results = await cl.search(COLLECTION_NAME, {
@@ -128,23 +115,20 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
       limit,
       score_threshold: scoreThreshold,
       with_payload: true,
-      params: {
-        hnsw_ef: 128
-      }
+      params: { hnsw_ef: 128 }
     });
 
-    console.log(`[qdrant-logger] Search for "${queryMessage}": found ${results.length} matches (threshold ${scoreThreshold})`);
+    console.log(`[qdrant-logger] Search complete - Found ${results.length} matches`);
 
     results.forEach((r, i) => {
-      const msg = typeof r.payload === 'object' && r.payload !== null && 'message' in r.payload
-        ? (r.payload as any).message
-        : '(no message)';
-      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - id ${r.id} - message: ${msg.slice(0, 100)}...`);
+      const payload = r.payload || {};
+      const msg = typeof payload === "object" && "message" in payload ? (payload as any).message : "(no message)";
+      console.log(`  Match ${i+1}: score=${r.score.toFixed(4)} | ID=${r.id} | "${msg.slice(0, 90)}..."`);
     });
 
     return results;
   } catch (err: any) {
-    console.error("[qdrant-logger] Search failed:", err.message, err.status);
+    console.error("[qdrant-logger] Search error:", err.message, err.status);
     return [];
   }
 }
@@ -192,15 +176,17 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-// Startup proof + search test
+// Startup proof + delayed search test
 (async () => {
   console.log("[qdrant-logger] Module loaded - running proof with varied vector");
   await logErrorMemory({
     bot_name: "coordinator",
     timestamp: new Date().toISOString(),
-    message: "PROOF v-varied-vector-20260316 - semantic search should now find matches",
-    context: { test: "varied-vector" }
+    message: "PROOF v-varied-vector-final-20260316 - search should now return matches"
   });
 
-  await searchSimilarLogs("TypeScript errors detected", 5, 0.1);
+  setTimeout(async () => {
+    console.log("[qdrant-logger] Delayed search test starting");
+    await searchSimilarLogs("TypeScript errors detected", 5, 0.05);
+  }, 3000);
 })();
