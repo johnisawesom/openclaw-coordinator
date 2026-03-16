@@ -1,4 +1,4 @@
-name: Fly Deploy - Fix Lockfile
+name: Fly Deploy - Fix Lockfile with PAT
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to Fly.io (with lockfile fix)
+    name: Deploy to Fly.io (lockfile fix + PAT)
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-group
@@ -25,8 +25,10 @@ jobs:
         run: npm install
 
       - name: Commit updated package-lock.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          git config user.name "GitHub Actions"
+          git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git add package-lock.json
           git commit -m "chore: update package-lock.json after adding @xenova/transformers" || echo "No changes to commit"
@@ -39,3 +41,4 @@ jobs:
         run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          
