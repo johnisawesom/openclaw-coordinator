@@ -1,4 +1,4 @@
-import { logger } from './qdrant-logger';
+import { logger } from './qdrant-logger.js';
 
 async function logStartup() {
   await logger.info("Coordinator booted - clean-slate baseline active", {
