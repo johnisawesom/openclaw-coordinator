@@ -26,7 +26,7 @@ const VECTOR_NAME = "dense";
 const VECTOR_SIZE = 1536;
 
 let client: QdrantClient | null = null;
-let pointIdCounter = Date.now(); // simple monotonic counter, starts at current timestamp
+let pointIdCounter = Date.now(); // monotonic integer IDs
 
 async function getClient(): Promise<QdrantClient | null> {
   if (client) return client;
@@ -75,7 +75,6 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const vector = new Float32Array(VECTOR_SIZE);
   vector.fill(0.0);
 
-  // Valid point ID: unsigned integer
   const pointId = pointIdCounter++;
   console.log("[qdrant-logger] Using integer point ID:", pointId);
 
@@ -83,14 +82,13 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
     await cl.upsert(COLLECTION_NAME, {
       wait: true,
       points: [{
-        id: pointId,                  // number, not string
+        id: pointId,
         vector: { [VECTOR_NAME]: Array.from(vector) },
         payload
       }]
     });
     console.log(`[qdrant-logger] Upsert success - id: ${pointId}`);
 
-    // Verify
     const retrieved = await cl.retrieve(COLLECTION_NAME, {
       ids: [pointId],
       with_payload: true
@@ -103,12 +101,40 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
     console.error("[qdrant-logger] VERIFY FAIL - retrieve returned nothing");
     return false;
   } catch (err: any) {
-    console.error("[qdrant-logger] Upsert failed. Details:");
-    console.error("Message:", err.message);
-    console.error("Status:", err.status);
-    console.error("Response data:", err.data ? JSON.stringify(err.data) : "no data");
-    console.error("Full err keys:", Object.keys(err));
+    console.error("[qdrant-logger] Upsert failed. Details:", err.message, err.status, JSON.stringify(err.data || {}));
     return false;
+  }
+}
+
+// NEW: Semantic search for similar logs (dummy vector for now)
+async function searchSimilarLogs(queryMessage: string, limit = 3, scoreThreshold = 0.5): Promise<any[]> {
+  const cl = await getClient();
+  if (!cl) return [];
+
+  // Dummy vector (same as upsert) - later replace with real embedding of queryMessage
+  const dummyVector = new Float32Array(VECTOR_SIZE);
+  dummyVector.fill(0.0);
+
+  try {
+    const results = await cl.search(COLLECTION_NAME, {
+      vector: {
+        name: VECTOR_NAME,
+        vector: Array.from(dummyVector)
+      },
+      limit,
+      score_threshold: scoreThreshold,
+      with_payload: true
+    });
+
+    console.log(`[qdrant-logger] Search results for "${queryMessage}": found ${results.length} matches`);
+    results.forEach((r, i) => {
+      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - message: ${r.payload?.message}`);
+    });
+
+    return results;
+  } catch (err: any) {
+    console.error("[qdrant-logger] Search failed:", err.message, err.status);
+    return [];
   }
 }
 
@@ -155,12 +181,16 @@ export const logger = {
     logToQdrant({ level: "debug", message: msg, timestamp: new Date().toISOString(), context: ctx })
 };
 
-// Proof on startup
+// Startup proof + retrieval test
 (async () => {
   console.log("[qdrant-logger] Module loaded - running proof with integer ID");
   await logErrorMemory({
     bot_name: "coordinator",
     timestamp: new Date().toISOString(),
-    message: "PROOF v-integer-id-20260314 - this should land in Qdrant now"
+    message: "PROOF v-integer-id-20260314 - this should land in Qdrant now",
+    context: { test: "final-push" }
   });
+
+  // Test retrieval
+  await searchSimilarLogs("TypeScript errors detected", 5, 0.1); // low threshold to catch some
 })();
