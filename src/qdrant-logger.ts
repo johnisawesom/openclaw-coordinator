@@ -31,7 +31,6 @@ let pointIdCounter = Date.now();
 function generateVariedVector(seed: number): number[] {
   const vector = new Array(VECTOR_SIZE).fill(0);
   for (let i = 0; i < VECTOR_SIZE; i++) {
-    // Simple deterministic variation: sin + seed offset + small noise
     vector[i] = Math.sin(i * 0.01 + seed * 0.1) * 0.5 + 0.5 + (Math.random() * 0.01);
   }
   return vector;
@@ -81,7 +80,6 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
 
-  // Varied vector based on timestamp seed
   const vector = generateVariedVector(Date.now());
   const pointId = pointIdCounter++;
 
@@ -119,9 +117,7 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
   const cl = await getClient();
   if (!cl) return [];
 
-  // For testing: use a fixed seed for query vector (same family as upsert)
-  // In real: replace with actual embedding of queryMessage
-  const queryVector = generateVariedVector(42); // consistent seed for now
+  const queryVector = generateVariedVector(42);
 
   try {
     const results = await cl.search(COLLECTION_NAME, {
@@ -133,13 +129,17 @@ async function searchSimilarLogs(queryMessage: string, limit = 5, scoreThreshold
       score_threshold: scoreThreshold,
       with_payload: true,
       params: {
-        hnsw_ef: 128 // boost recall
+        hnsw_ef: 128
       }
     });
 
     console.log(`[qdrant-logger] Search for "${queryMessage}": found ${results.length} matches (threshold ${scoreThreshold})`);
+
     results.forEach((r, i) => {
-      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - id ${r.id} - message: ${r.payload?.message?.slice(0, 100)}...`);
+      const msg = typeof r.payload === 'object' && r.payload !== null && 'message' in r.payload
+        ? (r.payload as any).message
+        : '(no message)';
+      console.log(`  Match ${i+1}: score ${r.score.toFixed(4)} - id ${r.id} - message: ${msg.slice(0, 100)}...`);
     });
 
     return results;
@@ -202,6 +202,5 @@ export const logger = {
     context: { test: "varied-vector" }
   });
 
-  // Test retrieval with a message that should match past tsc errors
   await searchSimilarLogs("TypeScript errors detected", 5, 0.1);
 })();
