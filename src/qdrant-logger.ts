@@ -2,8 +2,7 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-export interface ErrorMemory {
+interface ErrorMemory {
   bot_name: string;
   timestamp: string;
   message: string;
@@ -25,18 +24,15 @@ export interface StructuredLogEntry {
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
 const COLLECTION_NAME = "coordinator_logs";
 const VECTOR_NAME = "dense";
 const VECTOR_SIZE = 1536;
 
 // ── State ─────────────────────────────────────────────────────────────────────
-
 let _client: QdrantClient | null = null;
 let _pointIdCounter = Date.now();
 
 // ── Vector generation ─────────────────────────────────────────────────────────
-
 function generateVariedVector(seed: string): number[] {
   const vec: number[] = new Array(VECTOR_SIZE).fill(0);
   let hash = 0;
@@ -53,21 +49,16 @@ function generateVariedVector(seed: string): number[] {
 }
 
 // ── Qdrant client singleton ───────────────────────────────────────────────────
-
 async function getClient(): Promise<QdrantClient | null> {
   if (_client) return _client;
-
   const url = process.env.QDRANT_URL;
   const apiKey = process.env.QDRANT_API_KEY;
-
   if (!url || !apiKey) {
     console.error("[qdrant-logger] Missing QDRANT_URL or QDRANT_API_KEY");
     return null;
   }
-
   _client = new QdrantClient({ url, apiKey });
   console.log("[qdrant-logger] Client created");
-
   try {
     const coll = await _client.getCollection(COLLECTION_NAME);
     console.log(
@@ -77,7 +68,6 @@ async function getClient(): Promise<QdrantClient | null> {
   } catch (err: unknown) {
     const status = (err as any)?.status;
     const message = err instanceof Error ? err.message : String(err);
-
     if (status === 404) {
       console.log("[qdrant-logger] Creating collection with named vector 'dense'");
       await _client.createCollection(COLLECTION_NAME, {
@@ -92,20 +82,16 @@ async function getClient(): Promise<QdrantClient | null> {
       return null;
     }
   }
-
   return _client;
 }
 
 // ── Core upsert ───────────────────────────────────────────────────────────────
-
 async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
   const cl = await getClient();
   if (!cl) return false;
-
   const seed = (payload["message"] as string) || String(_pointIdCounter);
   const vector = generateVariedVector(seed);
   const pointId = _pointIdCounter++;
-
   try {
     await cl.upsert(COLLECTION_NAME, {
       wait: true,
@@ -128,7 +114,6 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
 }
 
 // ── Semantic search ───────────────────────────────────────────────────────────
-
 async function searchSimilarLogs(
   queryMessage: string,
   limit = 5,
@@ -136,9 +121,7 @@ async function searchSimilarLogs(
 ): Promise<unknown[]> {
   const cl = await getClient();
   if (!cl) return [];
-
   const queryVector = generateVariedVector(queryMessage);
-
   try {
     const results = await cl.search(COLLECTION_NAME, {
       vector: { name: VECTOR_NAME, vector: queryVector },
@@ -147,19 +130,16 @@ async function searchSimilarLogs(
       with_payload: true,
       params: { hnsw_ef: 256 },
     });
-
     console.log(
       `[qdrant-logger] Semantic search for "${queryMessage.slice(0, 50)}...": ${results.length} matches`
     );
-
     results.forEach((r: any, i: number) => {
       const p = r.payload ?? {};
       const msg = "message" in p ? String(p["message"]) : "(no message)";
       console.log(
-        `  Match ${i + 1}: score=${r.score.toFixed(4)} | ID=${r.id} | "${msg.slice(0, 80)}..."`
+        ` Match ${i + 1}: score=${r.score.toFixed(4)} | ID=${r.id} | "${msg.slice(0, 80)}..."`
       );
     });
-
     return results;
   } catch (err: unknown) {
     const status = (err as any)?.status;
@@ -170,7 +150,6 @@ async function searchSimilarLogs(
 }
 
 // ── Public logging functions ──────────────────────────────────────────────────
-
 async function logErrorMemory(memory: ErrorMemory): Promise<void> {
   const payload: Record<string, unknown> = {
     level: "error",
@@ -216,11 +195,12 @@ const logger = {
 };
 
 // ── Single clean export block ─────────────────────────────────────────────────
-
 export {
   logErrorMemory,
   logToQdrant,
   logger,
   searchSimilarLogs,
 };
+
 export type { ErrorMemory };
+
