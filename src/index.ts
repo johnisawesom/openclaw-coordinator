@@ -1,82 +1,69 @@
-import { createServer } from "http";
-import { logger, searchSimilarLogs } from "./qdrant-logger.js";
+import http from 'http';
+import { logErrorMemory, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
+import dotenv from 'dotenv';
 
-async function run() {
-  console.log(`[${new Date().toISOString()}] Coordinator started - Phase 2 recall live`);
+dotenv.config();
 
-  // Boot log
-  await logger.info("Coordinator boot confirmed - Phase 2 recall", {
-    bootTime: new Date().toISOString(),
-    version: "phase2-recall-2026-03-17",
-    region: process.env.FLY_REGION || "syd",
-  });
+const PORT = 8080;
 
-  // Simulate an error (for testing recall)
-  console.log("Phase 2: Simulating TypeScript error to test recall");
-  const simulatedError = {
-    bot_name: "coordinator",
+async function main() {
+  console.log('[Coordinator] Boot confirmed - OpenClaw v1 starting');
+
+  // Test error simulation - this should be upserted and searchable
+  const testError: ErrorMemory = {
     timestamp: new Date().toISOString(),
-    message: "TypeScript errors detected during build: duplicate export ErrorMemory",
-    stack: new Error("Simulated TS2484").stack,
-    context: {
-      file: "qdrant-logger.ts",
-      line: 226,
-      fixAttempt: "removed export keyword from interface",
-      outcome: "success"
-    }
+    type: 'TypeScript',
+    message: 'errors detected duplicate export',
+    details: {
+      file: 'example.ts',
+      line: 42,
+      previousFix: 'Added explicit export block and removed duplicate interface',
+    },
   };
 
-  await logger.error("Simulated error for recall test", simulatedError);
-
-  // Recall similar errors
-  console.log("Phase 2: Searching for similar past errors...");
   try {
-    const query = "TypeScript errors detected duplicate export";
-    const matches = await searchSimilarLogs(query, 5, 0.6);
+    const pointId = await logErrorMemory(testError);
+    console.log(`[Test] Error logged to Qdrant - point ID: ${pointId}`);
 
-    console.log(`Phase 2: Recall found ${matches.length} similar errors`);
+    // Immediate recall test - should match the one we just logged
+    const matches = await searchSimilarLogs(
+      'TypeScript errors detected duplicate export',
+      3,
+      0.65
+    );
 
-    if (matches.length > 0) {
-      matches.forEach((match: any, i: number) => {
-        const score = match.score?.toFixed(4) ?? "unknown";
-        const payload = match.payload ?? {};
-        console.log(`Recall ${i+1}: score=${score} | message="${payload.message || '(no message)'}..."`);
-        console.log(`  Payload: ${JSON.stringify(payload, null, 2)}`);
-      });
+    console.log('[Test] Recall results:');
+    console.dir(matches, { depth: null, colors: true });
 
-      // Meta-log the recall
-      await logger.info("Recall results for simulated TS error", {
-        query,
-        matchCount: matches.length,
-        matches: matches.map((m: any) => ({
-          score: m.score,
-          message: m.payload?.message,
-          timestamp: m.payload?.timestamp
-        }))
-      });
+    if (matches.length === 0) {
+      console.warn('[WARN] No matches found - check Qdrant collection config, HF token, or vector dimension');
+    } else if (matches[0].score < 0.85) {
+      console.warn(`[WARN] Best match score low (${matches[0].score}) - embeddings may be misconfigured`);
     } else {
-      console.log("Phase 2: No similar errors found yet");
+      console.log('[SUCCESS] Semantic recall working - best match score:', matches[0].score);
     }
-  } catch (err: any) {
-    console.error("Phase 2: Recall search failed:", err?.message || String(err));
+  } catch (err) {
+    console.error('[ERROR] Memory test failed:', err);
+    // Still keep alive
   }
 
-  // Health server
-  const server = createServer((req, res) => {
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("OK");
+  // Simple health server for Fly readiness probe
+  const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OK');
     } else {
       res.writeHead(404);
-      res.end();
+      res.end('Not Found');
     }
   });
 
-  server.listen(8080, "0.0.0.0", () => {
-    console.log("[health] Listening on 0.0.0.0:8080");
+  server.listen(PORT, () => {
+    console.log(`[Health] Server listening on port ${PORT}`);
   });
-
-  console.log("run() finished - staying alive");
 }
 
-run().catch(err => console.error("Top-level error:", err));
+main().catch(err => {
+  console.error('[FATAL] Coordinator crashed:', err);
+  // Never process.exit() - keep alive for Fly
+});
