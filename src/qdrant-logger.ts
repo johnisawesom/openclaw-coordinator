@@ -11,7 +11,6 @@ const qdrant = new QdrantClient({
 });
 
 const COLLECTION = 'coordinator_logs';
-const VECTOR_NAME = 'dense';
 const SCORE_THRESHOLD = 0.65;
 
 export interface ErrorMemory {
@@ -35,13 +34,12 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   const text = `${memory.type}: ${memory.message} ${JSON.stringify(memory.details || {})}`;
   const vector = await getEmbedding(text);
 
-  // VERIFIED integer point ID (Qdrant accepts 64-bit unsigned integer)
   const pointId = Date.now();
 
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: { [VECTOR_NAME]: vector },
+      vector: vector,   // ← unnamed vector - matches your current collection
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
@@ -53,7 +51,7 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
   const vector = await getEmbedding(query);
 
   const results = await qdrant.search(COLLECTION, {
-    vector: { name: VECTOR_NAME, vector },
+    vector: vector,   // ← unnamed vector
     limit,
     score_threshold: SCORE_THRESHOLD,
     with_payload: true,
