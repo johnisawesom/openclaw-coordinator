@@ -22,7 +22,7 @@ export interface ErrorMemory {
 
 async function getEmbedding(text: string): Promise<number[]> {
   const response = await fetch(
-    'https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2',
+    'https://api-inference.huggingface.co/models/BAAI/bge-small-en-v1.5',
     {
       method: 'POST',
       headers: {
@@ -39,7 +39,7 @@ async function getEmbedding(text: string): Promise<number[]> {
 
   const result = await response.json() as number[][];
 
-  // Manual mean pooling + normalize (proven method for this model)
+  // Verified manual mean pooling + normalize for 384-dim output
   const tokenEmbeddings = result;
   const sum = tokenEmbeddings.reduce((acc, val) => acc.map((v, i) => v + val[i]), new Array(tokenEmbeddings[0].length).fill(0));
   const mean = sum.map(v => v / tokenEmbeddings.length);
@@ -60,7 +60,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: vector,
+      vector: vector,   // plain array for your unnamed collection
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
