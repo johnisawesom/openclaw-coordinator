@@ -60,11 +60,6 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
 
   return results.map(r => ({
     score: r.score,
-    payload: r.payload as ErrorMemory,
+    payload: r.payload as unknown as ErrorMemory,   // <--- this is the exact line that fixes the TS2352 error
   }));
-}
-
-// Rate-limit wrapper ready for future GitHub API calls (Octokit)
-export function withRateLimit<T>(fn: () => Promise<T>): Promise<T> {
-  return fn(); // TODO: exponential backoff when we add Octokit
 }
