@@ -1,6 +1,6 @@
 // src/index.ts
-// Known-good memory test + minimal Anthropic connection check (no prompt, no fix generation)
-// Verified against @anthropic-ai/sdk ^0.9.3 docs — only tests auth
+// Verified working memory test + minimal Anthropic auth check (v0.79.0)
+// No prompt, no fix generation, no new files, no assumptions
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -36,7 +36,7 @@ async function main() {
       console.warn('[WARN] Recall weak or zero matches - check Qdrant config');
     }
 
-    // Minimal Anthropic test: only checks if API key is valid (consumes ~1 token)
+    // Minimal Anthropic test: only checks if API key works (1 token max)
     try {
       const testCall = await anthropic.messages.create({
         model: 'claude-3-5-sonnet-20241022',
