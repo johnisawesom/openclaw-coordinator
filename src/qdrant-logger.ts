@@ -22,7 +22,7 @@ export interface ErrorMemory {
 
 async function getEmbedding(text: string): Promise<number[]> {
   const response = await fetch(
-    'https://api-inference.huggingface.co/models/BAAI/bge-small-en-v1.5',
+    'https://api-inference.huggingface.co/models/intfloat/e5-small-v2',
     {
       method: 'POST',
       headers: {
@@ -60,7 +60,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: vector,   // plain array for your unnamed collection
+      vector: vector,
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
@@ -83,3 +83,4 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
     payload: r.payload as unknown as ErrorMemory,
   }));
 }
+
