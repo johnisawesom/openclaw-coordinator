@@ -1,6 +1,6 @@
 // src/index.ts
-// Verified working memory test + minimal Anthropic auth check (v0.79.0)
-// No prompt, no fix generation, no new files, no assumptions
+// Known-good memory test + minimal Anthropic auth check (v0.79.0)
+// Verified tsc-clean: explicit catch type + narrowing, .js extension, no implicit any
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const PORT = 8080;
+
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
@@ -36,7 +37,7 @@ async function main() {
       console.warn('[WARN] Recall weak or zero matches - check Qdrant config');
     }
 
-    // Minimal Anthropic test: only checks if API key works (1 token max)
+    // Minimal Anthropic auth test — consumes 1 token max, only verifies key
     try {
       const testCall = await anthropic.messages.create({
         model: 'claude-3-5-sonnet-20241022',
@@ -44,8 +45,9 @@ async function main() {
         messages: [{ role: 'user', content: 'ping' }]
       });
       console.log('[TEST] Claude API connected successfully');
-    } catch (claudeErr) {
-      console.error('[TEST] Claude connection failed:', claudeErr.message);
+    } catch (claudeErr: unknown) {
+      const err = claudeErr instanceof Error ? claudeErr : new Error(String(claudeErr));
+      console.error('[TEST] Claude connection failed:', err.message);
     }
 
   } catch (e) {
