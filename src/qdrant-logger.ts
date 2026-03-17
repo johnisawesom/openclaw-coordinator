@@ -28,9 +28,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     model: 'sentence-transformers/all-MiniLM-L6-v2',
     inputs: text,
   });
-
-  const vector = Array.from(result[0] as number[]);
-  return vector;
+  return Array.from(result[0] as number[]);
 }
 
 export async function upsertPoint(memory: ErrorMemory): Promise<string> {
@@ -43,10 +41,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
     points: [{
       id: pointId,
       vector: { [VECTOR_NAME]: vector },
-      payload: {
-        ...memory,
-        timestamp: memory.timestamp || new Date().toISOString(),
-      },
+      payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
 
@@ -67,4 +62,9 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
     score: r.score,
     payload: r.payload as ErrorMemory,
   }));
+}
+
+// Rate-limit wrapper ready for future GitHub API calls (Octokit)
+export function withRateLimit<T>(fn: () => Promise<T>): Promise<T> {
+  return fn(); // TODO: exponential backoff when we add Octokit
 }
