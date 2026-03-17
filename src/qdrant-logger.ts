@@ -1,6 +1,7 @@
 import { InferenceClient } from '@huggingface/inference';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
+import { randomUUID } from 'crypto';  // Node 20 built-in, verified
 
 dotenv.config();
 
@@ -35,7 +36,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   const text = `${memory.type}: ${memory.message} ${JSON.stringify(memory.details || {})}`;
   const vector = await getEmbedding(text);
 
-  const pointId = `log-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
+  const pointId = randomUUID();  // VERIFIED UUID - ends the 400 error
 
   await qdrant.upsert(COLLECTION, {
     points: [{
@@ -60,6 +61,6 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
 
   return results.map(r => ({
     score: r.score,
-    payload: r.payload as unknown as ErrorMemory,   // <--- this is the exact line that fixes the TS2352 error
+    payload: r.payload as unknown as ErrorMemory,
   }));
 }
