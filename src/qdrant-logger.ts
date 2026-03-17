@@ -26,13 +26,25 @@ async function getEmbedding(text: string): Promise<number[]> {
   const result = await hf.featureExtraction({
     model: 'sentence-transformers/all-MiniLM-L6-v2',
     inputs: text,
-    options: { pooling: 'mean', normalize: true },   // ← VERIFIED: forces 384 dims
   });
-  const vector = Array.from(result[0] as number[]);
 
-  console.log(`[DEBUG] Embedding length: ${vector.length}`); // will appear in Fly logs
+  const tokenEmbeddings = result[0] as number[][];
 
-  return vector;
+  if (tokenEmbeddings.length === 0) {
+    throw new Error('HF returned empty embeddings');
+  }
+
+  // Manual mean pooling (proven method for this model)
+  const sum = tokenEmbeddings.reduce((acc, val) => acc.map((v, i) => v + val[i]), new Array(tokenEmbeddings[0].length).fill(0));
+  const mean = sum.map(v => v / tokenEmbeddings.length);
+
+  // Normalize
+  const norm = Math.sqrt(mean.reduce((acc, v) => acc + v * v, 0));
+  const normalized = mean.map(v => v / norm);
+
+  console.log(`[DEBUG] Embedding length: ${normalized.length}`); // will appear in logs
+
+  return normalized;
 }
 
 export async function upsertPoint(memory: ErrorMemory): Promise<string> {
@@ -44,7 +56,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: vector,   // plain array for your unnamed collection
+      vector: vector,   // plain array for unnamed collection
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
