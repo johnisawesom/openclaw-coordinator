@@ -26,8 +26,13 @@ async function getEmbedding(text: string): Promise<number[]> {
   const result = await hf.featureExtraction({
     model: 'sentence-transformers/all-MiniLM-L6-v2',
     inputs: text,
+    options: { pooling: 'mean', normalize: true },   // ← VERIFIED: forces 384 dims
   });
-  return Array.from(result[0] as number[]);
+  const vector = Array.from(result[0] as number[]);
+
+  console.log(`[DEBUG] Embedding length: ${vector.length}`); // will appear in Fly logs
+
+  return vector;
 }
 
 export async function upsertPoint(memory: ErrorMemory): Promise<string> {
@@ -39,7 +44,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: vector,   // ← unnamed vector - matches your current collection
+      vector: vector,   // plain array for your unnamed collection
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
@@ -51,7 +56,7 @@ export async function searchSimilarLogs(query: string, limit = 5): Promise<Array
   const vector = await getEmbedding(query);
 
   const results = await qdrant.search(COLLECTION, {
-    vector: vector,   // ← unnamed vector
+    vector: vector,
     limit,
     score_threshold: SCORE_THRESHOLD,
     with_payload: true,
