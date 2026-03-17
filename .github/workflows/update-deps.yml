@@ -1,12 +1,11 @@
-name: Update Dependencies for Embeddings
+name: Update Dependencies for Accurate Recall
 
 on:
-  workflow_dispatch:  # manual trigger only - you run it from Actions tab
+  workflow_dispatch:  # manual trigger only - run from Actions tab
 
 jobs:
   update:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,13 +19,12 @@ jobs:
           cache: 'npm'
 
       - name: Install @huggingface/transformers
-        run: |
-          npm install @huggingface/transformers --save
+        run: npm install @huggingface/transformers --save
 
-      - name: Commit updated package.json and lockfile
+      - name: Commit updated files
         run: |
           git config --global user.name "OpenClaw Bot"
           git config --global user.email "bot@openclaw.com"
           git add package.json package-lock.json
-          git commit -m "chore(deps): add @huggingface/transformers for accurate semantic recall" || echo "No changes to commit"
+          git commit -m "chore(deps): add @huggingface/transformers for semantic recall" || echo "No changes to commit"
           git push origin HEAD:main
