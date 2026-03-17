@@ -32,18 +32,23 @@ const VECTOR_SIZE = 1536;
 let _client: QdrantClient | null = null;
 let _pointIdCounter = Date.now();
 
-// ── Vector generation ─────────────────────────────────────────────────────────
+// ── Vector generation (normalized for better recall) ───────────────────────────
 function generateVariedVector(seed: string): number[] {
+  const normalized = seed
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   const vec: number[] = new Array(VECTOR_SIZE).fill(0);
   let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < normalized.length; i++) {
+    hash = (hash * 31 + normalized.charCodeAt(i)) >>> 0;
   }
   for (let i = 0; i < VECTOR_SIZE; i++) {
     hash = (hash * 1664525 + 1013904223) >>> 0;
     vec[i] = ((hash & 0xffff) / 0xffff) * 2 - 1;
   }
-  // L2-normalise
   const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
   return vec.map((v) => v / norm);
 }
@@ -117,7 +122,7 @@ async function upsertPoint(payload: Record<string, unknown>): Promise<boolean> {
 async function searchSimilarLogs(
   queryMessage: string,
   limit = 5,
-  scoreThreshold = 0.6
+  scoreThreshold = 0.45
 ): Promise<unknown[]> {
   const cl = await getClient();
   if (!cl) return [];
@@ -203,4 +208,3 @@ export {
 };
 
 export type { ErrorMemory };
-
