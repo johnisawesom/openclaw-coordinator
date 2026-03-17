@@ -1,7 +1,7 @@
-name: Update Dependencies for Accurate Recall
+name: Force Update Embeddings Dependency
 
 on:
-  workflow_dispatch:  # manual trigger only - run from Actions tab
+  workflow_dispatch:
 
 jobs:
   update:
@@ -10,7 +10,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_PAT }}  # your PAT from Fly secrets
+          token: ${{ secrets.GITHUB_PAT }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -18,13 +18,18 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install @huggingface/transformers
-        run: npm install @huggingface/transformers --save
+      - name: Clean and reinstall dependencies
+        run: |
+          npm ci --force || npm install --force
 
-      - name: Commit updated files
+      - name: Install @huggingface/transformers explicitly
+        run: |
+          npm install @huggingface/transformers@latest --save --force
+
+      - name: Commit changes if any
         run: |
           git config --global user.name "OpenClaw Bot"
           git config --global user.email "bot@openclaw.com"
           git add package.json package-lock.json
-          git commit -m "chore(deps): add @huggingface/transformers for semantic recall" || echo "No changes to commit"
-          git push origin HEAD:main
+          git diff --quiet && git diff --staged --quiet || git commit -m "chore(deps): force add @huggingface/transformers for semantic recall"
+          git push origin HEAD:main || echo "No push needed or already up-to-date"
