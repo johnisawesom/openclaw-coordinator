@@ -1,6 +1,5 @@
 // src/index.ts
-// Updated for Phase 2: use semantic recall → inject into Claude prompt → propose fix
-// Keeps health server alive, minimal changes, human safety net on PR creation
+// Resolved merge: clean memory test + safe Claude proposal (PR creation still disabled)
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import { Anthropic } from '@anthropic-ai/sdk';
@@ -11,13 +10,9 @@ dotenv.config();
 const PORT = 8080;
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
-const REPO_OWNER = 'johnisawesom';
-const REPO_NAME = 'openclaw-coordinator';
-
 async function main() {
   console.log('[Coordinator] Boot confirmed - memory-v1 starting');
 
-  // Test error (simulate what coordinator will see in real operation)
   const testError: ErrorMemory = {
     timestamp: new Date().toISOString(),
     type: 'TypeScript',
@@ -27,11 +22,11 @@ async function main() {
   };
 
   try {
-    // 1. Always log new error to memory
+    // 1. Log the error to memory (always)
     const id = await upsertPoint(testError);
     console.log(`[Test] Error upserted - point ID: ${id}`);
 
-    // 2. Search for similar past errors/fixes
+    // 2. Search for similar past fixes
     const queryText = `${testError.type}: ${testError.message} ${JSON.stringify(testError.details || {})}`;
     const matches = await searchSimilarLogs(queryText);
 
@@ -46,7 +41,7 @@ async function main() {
         .map(m => `Past similar error/fix (score ${m.score.toFixed(3)}):\n${JSON.stringify(m.payload, null, 2)}`)
         .join('\n\n---\n\n');
 
-      // 4. Claude prompt — keep it tight, focused on minimal fix
+      // 4. Claude prompt (tight, focused)
       const prompt = `
 You are a senior TypeScript engineer fixing bugs in OpenClaw Coordinator.
 Use previous similar errors and fixes only if relevant.
@@ -80,7 +75,7 @@ brief explanation
 full patch here (against existing files)
 \`\`\`
 
-No extra text outside these sections.
+No extra text.
 `;
 
       console.log('[DEBUG] Sending prompt to Claude...');
@@ -95,9 +90,8 @@ No extra text outside these sections.
       const claudeOutput = response.content[0].text;
       console.log('[CLAUDE FIX PROPOSAL]\n' + claudeOutput);
 
-      // TODO next PR: parse output, create branch/PR via Octokit
-      // Rate-limiting note: wrap Octokit calls with exponential backoff + retry
-      // e.g. 3 attempts, 1s → 2s → 4s delay on 429/5xx
+      // Rate-limiting note: future Octokit calls MUST use exponential backoff + retry
+      // e.g. 3 attempts, delay = 1000 * (2 ** attempt)
 
     } else {
       console.warn('[WARN] No strong recall matches — no auto-fix attempted');
