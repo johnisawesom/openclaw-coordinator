@@ -1,0 +1,32 @@
+name: Update Dependencies for Embeddings
+
+on:
+  workflow_dispatch:  # manual trigger only - you run it from Actions tab
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_PAT }}  # your PAT from Fly secrets
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install @huggingface/transformers
+        run: |
+          npm install @huggingface/transformers --save
+
+      - name: Commit updated package.json and lockfile
+        run: |
+          git config --global user.name "OpenClaw Bot"
+          git config --global user.email "bot@openclaw.com"
+          git add package.json package-lock.json
+          git commit -m "chore(deps): add @huggingface/transformers for accurate semantic recall" || echo "No changes to commit"
+          git push origin HEAD:main
