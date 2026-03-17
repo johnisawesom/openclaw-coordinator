@@ -1,15 +1,28 @@
+// src/qdrant-logger.ts
+// FINAL FIX — 2GB + offline xenova non-quantized singleton — full 384 semantic recall
+import { pipeline } from '@xenova/transformers';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const qdrant = new QdrantClient({
+let embeddingPipeline: any = null;
+
+const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL!,
   apiKey: process.env.QDRANT_API_KEY!,
 });
 
-const COLLECTION = 'coordinator_logs';
-const SCORE_THRESHOLD = 0.65;
+const COLLECTION_NAME = 'coordinator_logs';
+
+async function getPipeline() {
+  if (!embeddingPipeline) {
+    console.log('[INFO] Loading embedding model (first boot only — 2GB required)');
+    embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    console.log('[INFO] Model loaded successfully');
+  }
+  return embeddingPipeline;
+}
 
 export interface ErrorMemory {
   timestamp: string;
@@ -20,67 +33,46 @@ export interface ErrorMemory {
   confidence?: number;
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const response = await fetch(
-    'https://api-inference.huggingface.co/models/intfloat/e5-small-v2',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.HF_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ inputs: text }),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`HF API error: ${response.status}`);
+export async function getEmbedding(text: string): Promise<number[]> {
+  const pipe = await getPipeline();
+  const output = await pipe(text, {
+    pooling: 'mean',
+    normalize: true
+  });
+  const embedding = Array.from(output.data) as number[];
+  console.log(`[DEBUG] Embedding length: ${embedding.length}`);
+  if (embedding.length !== 384) {
+    throw new Error(`Vector dimension error: expected 384, got ${embedding.length}`);
   }
-
-  const result = await response.json() as number[][];
-
-  // Verified manual mean pooling + normalize for 384-dim output
-  const tokenEmbeddings = result;
-  const sum = tokenEmbeddings.reduce((acc, val) => acc.map((v, i) => v + val[i]), new Array(tokenEmbeddings[0].length).fill(0));
-  const mean = sum.map(v => v / tokenEmbeddings.length);
-  const norm = Math.sqrt(mean.reduce((acc, v) => acc + v * v, 0));
-  const normalized = mean.map(v => v / norm);
-
-  console.log(`[DEBUG] Embedding length: ${normalized.length}`);
-
-  return normalized;
+  return embedding;
 }
 
 export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   const text = `${memory.type}: ${memory.message} ${JSON.stringify(memory.details || {})}`;
   const vector = await getEmbedding(text);
-
   const pointId = Date.now();
-
-  await qdrant.upsert(COLLECTION, {
+  await qdrantClient.upsert(COLLECTION_NAME, {
     points: [{
       id: pointId,
-      vector: vector,
-      payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
-    }],
+      vector,
+      payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() }
+    }]
   });
-
+  console.log(`[SUCCESS] upsertPoint id=${pointId}`);
   return pointId.toString();
 }
 
-export async function searchSimilarLogs(query: string, limit = 5): Promise<Array<{score: number; payload: ErrorMemory}>> {
+export async function searchSimilarLogs(query: string, limit = 5) {
   const vector = await getEmbedding(query);
-
-  const results = await qdrant.search(COLLECTION, {
-    vector: vector,
+  const results = await qdrantClient.search(COLLECTION_NAME, {
+    vector,
     limit,
-    score_threshold: SCORE_THRESHOLD,
-    with_payload: true,
+    score_threshold: 0.65,
+    with_payload: true
   });
-
+  console.log(`[SUCCESS] searchSimilarLogs — found ${results.length} matches (score > 0.65)`);
   return results.map(r => ({
     score: r.score,
-    payload: r.payload as unknown as ErrorMemory,
+    payload: r.payload as unknown as ErrorMemory
   }));
 }
-
