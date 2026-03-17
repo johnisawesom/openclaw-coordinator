@@ -1,10 +1,8 @@
-import { InferenceClient } from '@huggingface/inference';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const hf = new InferenceClient(process.env.HF_TOKEN!);
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL!,
   apiKey: process.env.QDRANT_API_KEY!,
@@ -23,26 +21,32 @@ export interface ErrorMemory {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const result = await hf.featureExtraction({
-    model: 'sentence-transformers/all-MiniLM-L6-v2',
-    inputs: text,
-  });
+  const response = await fetch(
+    'https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.HF_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ inputs: text }),
+    }
+  );
 
-  const tokenEmbeddings = result[0] as number[][];
-
-  if (tokenEmbeddings.length === 0) {
-    throw new Error('HF returned empty embeddings');
+  if (!response.ok) {
+    throw new Error(`HF API error: ${response.status}`);
   }
 
-  // Manual mean pooling (proven method for this model)
+  const result = await response.json() as number[][];
+
+  // Manual mean pooling + normalize (proven method for this model)
+  const tokenEmbeddings = result;
   const sum = tokenEmbeddings.reduce((acc, val) => acc.map((v, i) => v + val[i]), new Array(tokenEmbeddings[0].length).fill(0));
   const mean = sum.map(v => v / tokenEmbeddings.length);
-
-  // Normalize
   const norm = Math.sqrt(mean.reduce((acc, v) => acc + v * v, 0));
   const normalized = mean.map(v => v / norm);
 
-  console.log(`[DEBUG] Embedding length: ${normalized.length}`); // will appear in logs
+  console.log(`[DEBUG] Embedding length: ${normalized.length}`);
 
   return normalized;
 }
@@ -56,7 +60,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   await qdrant.upsert(COLLECTION, {
     points: [{
       id: pointId,
-      vector: vector,   // plain array for unnamed collection
+      vector: vector,
       payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() },
     }],
   });
