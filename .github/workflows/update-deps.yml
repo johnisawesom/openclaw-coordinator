@@ -1,4 +1,4 @@
-name: Force Update Embeddings Dependency
+name: Force Add Huggingface Transformers
 
 on:
   workflow_dispatch:
@@ -18,18 +18,20 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Clean and reinstall dependencies
-        run: |
-          npm ci --force || npm install --force
+      - name: Debug current package.json
+        run: cat package.json
 
-      - name: Install @huggingface/transformers explicitly
+      - name: Force install transformers
         run: |
-          npm install @huggingface/transformers@latest --save --force
+          npm install @huggingface/transformers@latest --save --force --legacy-peer-deps
+          echo "Install complete - checking package.json"
+          grep transformers package.json || echo "No transformers in package.json!"
 
-      - name: Commit changes if any
+      - name: Commit if changed
         run: |
           git config --global user.name "OpenClaw Bot"
           git config --global user.email "bot@openclaw.com"
           git add package.json package-lock.json
-          git diff --quiet && git diff --staged --quiet || git commit -m "chore(deps): force add @huggingface/transformers for semantic recall"
-          git push origin HEAD:main || echo "No push needed or already up-to-date"
+          git diff --quiet && git diff --staged --quiet && echo "No changes" || git commit -m "chore(deps): force add @huggingface/transformers for semantic recall"
+          git push origin HEAD:main || echo "Push complete or already up-to-date"
+          
