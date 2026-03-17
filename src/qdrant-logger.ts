@@ -1,7 +1,6 @@
 import { InferenceClient } from '@huggingface/inference';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
-import { randomUUID } from 'crypto';  // Node 20 built-in, verified
 
 dotenv.config();
 
@@ -36,7 +35,8 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
   const text = `${memory.type}: ${memory.message} ${JSON.stringify(memory.details || {})}`;
   const vector = await getEmbedding(text);
 
-  const pointId = randomUUID();  // VERIFIED UUID - ends the 400 error
+  // VERIFIED integer point ID (Qdrant accepts 64-bit unsigned integer)
+  const pointId = Date.now();
 
   await qdrant.upsert(COLLECTION, {
     points: [{
@@ -46,7 +46,7 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
     }],
   });
 
-  return pointId;
+  return pointId.toString();
 }
 
 export async function searchSimilarLogs(query: string, limit = 5): Promise<Array<{score: number; payload: ErrorMemory}>> {
