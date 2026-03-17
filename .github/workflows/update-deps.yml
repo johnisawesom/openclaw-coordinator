@@ -18,20 +18,21 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Debug current package.json
-        run: cat package.json
+      - name: Clean npm cache & uninstall any old transformers
+        run: |
+          npm cache clean --force
+          npm uninstall @xenova/transformers @huggingface/transformers || true
 
-      - name: Force install transformers
+      - name: Force install latest transformers
         run: |
           npm install @huggingface/transformers@latest --save --force --legacy-peer-deps
-          echo "Install complete - checking package.json"
-          grep transformers package.json || echo "No transformers in package.json!"
+          echo "=== package.json after install ==="
+          cat package.json | grep transformers || echo "No transformers line found!"
 
       - name: Commit if changed
         run: |
           git config --global user.name "OpenClaw Bot"
           git config --global user.email "bot@openclaw.com"
           git add package.json package-lock.json
-          git diff --quiet && git diff --staged --quiet && echo "No changes" || git commit -m "chore(deps): force add @huggingface/transformers for semantic recall"
+          git diff --quiet && git diff --staged --quiet && echo "No changes detected" || git commit -m "chore(deps): force add @huggingface/transformers for semantic recall"
           git push origin HEAD:main || echo "Push complete or already up-to-date"
-          
