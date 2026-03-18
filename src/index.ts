@@ -5,6 +5,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
 dotenv.config();
+console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 
 const PORT = 8080;
 
