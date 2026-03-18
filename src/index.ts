@@ -2,6 +2,7 @@
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
+import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
 dotenv.config();
 
