@@ -13,7 +13,7 @@ const anthropic = new Anthropic({
 });
 
 async function main() {
-  console.log('[Coordinator] Boot confirmed - memory-v1 starting');
+  console.log('[Coordinator] Boot confirmed - memory-v2 starting');
 
   const testError: ErrorMemory = {
     timestamp: new Date().toISOString(),
