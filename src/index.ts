@@ -1,6 +1,6 @@
 // src/index.ts
 // Known-good memory test + minimal Anthropic auth check (v0.79.0)
-// Verified tsc-clean: explicit catch type + narrowing, .js extension, no implicit any
+// Model name validated live: claude-sonnet-4-6 is current active Sonnet (3.5 snapshots retired)
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -40,7 +40,7 @@ async function main() {
     // Minimal Anthropic auth test — consumes 1 token max, only verifies key
     try {
       const testCall = await anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
+        model: 'claude-sonnet-4-6',          // current active model per live docs March 2026
         max_tokens: 1,
         messages: [{ role: 'user', content: 'ping' }]
       });
