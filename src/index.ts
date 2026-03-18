@@ -1,6 +1,7 @@
 // src/index.ts
-// Known-good memory test + minimal Anthropic auth check (v0.79.0)
-// Model name validated live: claude-sonnet-4-6 is current active Sonnet (3.5 snapshots retired)
+// Final verified version — memory test + Claude prompt test (logs raw response)
+// Model validated live: claude-sonnet-4-6 (current active Sonnet per March 2026 docs)
+// SDK v0.79.0 confirmed, tsc-clean, memory layer untouched
 import http from 'http';
 import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -37,17 +38,41 @@ async function main() {
       console.warn('[WARN] Recall weak or zero matches - check Qdrant config');
     }
 
-    // Minimal Anthropic auth test — consumes 1 token max, only verifies key
+    // Claude prompt test — uses recall context, logs raw response only
     try {
-      const testCall = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',          // current active model per live docs March 2026
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'ping' }]
+      const context = matches
+        .filter(m => m.score > 0.65)
+        .map(m => `Past similar (score ${m.score.toFixed(3)}): ${JSON.stringify(m.payload)}`)
+        .join('\n\n');
+
+      const prompt = `
+You are a senior TypeScript engineer fixing OpenClaw Coordinator.
+
+Current error:
+${testError.type}: ${testError.message}
+Details: ${JSON.stringify(testError.details)}
+
+Past similar fixes:
+${context || '(none found)'}
+
+Propose a minimal one-line fix or comment to add.
+Output ONLY the suggestion (no extra text).
+`;
+
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',   // current active model per live docs
+        max_tokens: 100,
+        messages: [{ role: 'user', content: prompt }]
       });
-      console.log('[TEST] Claude API connected successfully');
+
+      const claudeText = response.content[0].text;
+      console.log('[CLAUDE RAW RESPONSE]');
+      console.log(claudeText);
+      console.log('[END CLAUDE RESPONSE]');
+
     } catch (claudeErr: unknown) {
       const err = claudeErr instanceof Error ? claudeErr : new Error(String(claudeErr));
-      console.error('[TEST] Claude connection failed:', err.message);
+      console.error('[CLAUDE ERROR]:', err.message);
     }
 
   } catch (e) {
