@@ -98,7 +98,8 @@ async function commitPlaceholder(
 
 export async function createFixPR(
   suggestion: string,
-  errorType: string
+  errorType: string,
+  existingBranch?: string
 ): Promise<string> {
   const token = process.env.GITHUB_PAT ?? "";
 
@@ -108,11 +109,20 @@ export async function createFixPR(
 
   const octokit = new Octokit({ auth: token });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const branchName = `fix/auto-${timestamp}`;
 
-  const mainSha = await getMainSha(octokit);
-  await createBranch(octokit, branchName, mainSha);
-  await commitPlaceholder(octokit, branchName, suggestion, timestamp);
+  let branchName: string;
+
+  if (existingBranch) {
+    // Coder Bot already created the branch with real file edits
+    branchName = existingBranch;
+    console.log(`[INFO] Using existing branch from Coder Bot: ${branchName}`);
+  } else {
+    // Fallback — create branch with placeholder commit
+    branchName = `fix/auto-${timestamp}`;
+    const mainSha = await getMainSha(octokit);
+    await createBranch(octokit, branchName, mainSha);
+    await commitPlaceholder(octokit, branchName, suggestion, timestamp);
+  }
 
   const pr = await withRateLimitRetry(() =>
     octokit.rest.pulls.create({
