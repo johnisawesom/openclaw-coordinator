@@ -1,0 +1,18 @@
+name: Weekly Compact
+
+on:
+  schedule:
+    - cron: '0 23 * * 0'  # Sunday 11pm UTC = Monday 9am AEST
+  workflow_dispatch:       # Manual trigger for testing
+
+jobs:
+  compact:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger compact
+        run: |
+          curl -X POST https://openclaw-coordinator.fly.dev/compact \
+            -H "Content-Type: application/json" \
+            --fail \
+            --silent \
+            --show-error
