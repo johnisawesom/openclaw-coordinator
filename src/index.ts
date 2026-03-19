@@ -13,6 +13,54 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+interface FixSuggestion {
+  file: string;
+  line: number;
+  action: 'delete_line' | 'replace_line' | 'insert_after';
+  newContent: string;
+  description: string;
+}
+
+function parseFixSuggestion(raw: string): FixSuggestion {
+  const cleaned = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+
+  const parsed: unknown = JSON.parse(cleaned);
+
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>).file !== 'string' ||
+    typeof (parsed as Record<string, unknown>).line !== 'number' ||
+    typeof (parsed as Record<string, unknown>).action !== 'string' ||
+    typeof (parsed as Record<string, unknown>).newContent !== 'string' ||
+    typeof (parsed as Record<string, unknown>).description !== 'string'
+  ) {
+    throw new Error('Missing or invalid fields in Claude JSON response');
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+
+  if (
+    candidate.action !== 'delete_line' &&
+    candidate.action !== 'replace_line' &&
+    candidate.action !== 'insert_after'
+  ) {
+    throw new Error(`Invalid action value: ${String(candidate.action)}`);
+  }
+
+  return {
+    file: candidate.file as string,
+    line: candidate.line as number,
+    action: candidate.action as FixSuggestion['action'],
+    newContent: candidate.newContent as string,
+    description: candidate.description as string,
+  };
+}
+
 export async function handleError(error: ErrorMemory): Promise<void> {
   console.log(`[handleError] Processing: ${error.type} — ${error.message}`);
 
@@ -36,25 +84,45 @@ Details: ${JSON.stringify(error.details)}
 Past similar fixes:
 ${context || '(none found)'}
 
-Propose a minimal one-line fix or comment to add.
-Output ONLY the suggestion (no extra text).`;
+Respond with ONLY a JSON object in this exact format, no other text:
+{
+  "file": "src/filename.ts",
+  "line": <line number as integer>,
+  "action": "delete_line" | "replace_line" | "insert_after",
+  "newContent": "<the replacement or insertion content, empty string if action is delete_line>",
+  "description": "<one sentence explaining the fix>"
+}`;
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 100,
+      max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });
 
     const textBlock = response.content.find(
       (block): block is Anthropic.TextBlock => block.type === 'text'
     );
-    const claudeText = textBlock ? textBlock.text : 'No text response';
+    const claudeText = textBlock ? textBlock.text : '';
 
     console.log('[CLAUDE RAW RESPONSE]');
     console.log(claudeText);
     console.log('[END CLAUDE RESPONSE]');
 
-    const prUrl = await createFixPR(claudeText, error.type);
+    let fixJson: FixSuggestion;
+    try {
+      fixJson = parseFixSuggestion(claudeText);
+      console.log('[INFO] Structured fix parsed:', JSON.stringify(fixJson));
+    } catch (parseErr: unknown) {
+      const e = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
+      console.error('[PARSE ERROR] Claude did not return valid JSON:', e.message);
+      console.error('[PARSE ERROR] Raw response was:', claudeText);
+      return;
+    }
+
+    const prUrl = await createFixPR(
+      `${fixJson.description}\n\n\`\`\`\nFile: ${fixJson.file}\nLine: ${fixJson.line}\nAction: ${fixJson.action}\nNew content: ${fixJson.newContent}\n\`\`\``,
+      error.type
+    );
     console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
 
   } catch (err: unknown) {
@@ -66,7 +134,6 @@ Output ONLY the suggestion (no extra text).`;
 async function main(): Promise<void> {
   console.log('[Coordinator] Boot confirmed - memory-v2 starting');
 
-  // Boot-time smoke test — confirms memory + embedding only, no PR created
   try {
     const smokeError: ErrorMemory = {
       timestamp: new Date().toISOString(),
