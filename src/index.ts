@@ -13,41 +13,25 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-async function main() {
-  console.log('[Coordinator] Boot confirmed - memory-v2 starting');
-
-  const testError: ErrorMemory = {
-    timestamp: new Date().toISOString(),
-    type: 'TypeScript',
-    message: 'errors detected duplicate export',
-    details: { file: 'qdrant-logger.ts', line: 42 },
-  };
+export async function handleError(error: ErrorMemory): Promise<void> {
+  console.log(`[handleError] Processing: ${error.type} — ${error.message}`);
 
   try {
-    const id = await upsertPoint(testError);
-    console.log(`[Test] Error upserted - point ID: ${id}`);
+    const id = await upsertPoint(error);
+    console.log(`[handleError] Upserted point ID: ${id}`);
 
-    const matches = await searchSimilarLogs('TypeScript errors detected duplicate export');
-    console.log('[Test] Recall results:', JSON.stringify(matches, null, 2));
+    const matches = await searchSimilarLogs(error.message);
 
-    if (matches.length > 0 && matches[0].score > 0.8) {
-      console.log(`[SUCCESS] Semantic recall working - best score: ${matches[0].score}`);
-    } else {
-      console.warn('[WARN] Recall weak or zero matches - check Qdrant config');
-    }
+    const context = matches
+      .filter(m => m.score > 0.65)
+      .map(m => `Past similar (score ${m.score.toFixed(3)}): ${JSON.stringify(m.payload)}`)
+      .join('\n\n');
 
-    // Claude prompt test — safe text extraction
-    try {
-      const context = matches
-        .filter(m => m.score > 0.65)
-        .map(m => `Past similar (score ${m.score.toFixed(3)}): ${JSON.stringify(m.payload)}`)
-        .join('\n\n');
-
-      const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
+    const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
 
 Current error:
-${testError.type}: ${testError.message}
-Details: ${JSON.stringify(testError.details)}
+${error.type}: ${error.message}
+Details: ${JSON.stringify(error.details)}
 
 Past similar fixes:
 ${context || '(none found)'}
@@ -55,37 +39,57 @@ ${context || '(none found)'}
 Propose a minimal one-line fix or comment to add.
 Output ONLY the suggestion (no extra text).`;
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 100,
-        messages: [{ role: 'user', content: prompt }],
-      });
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: prompt }],
+    });
 
-      const textBlock = response.content.find(
-        (block): block is Anthropic.TextBlock => block.type === 'text'
-      );
-      const claudeText = textBlock ? textBlock.text : 'No text response';
+    const textBlock = response.content.find(
+      (block): block is Anthropic.TextBlock => block.type === 'text'
+    );
+    const claudeText = textBlock ? textBlock.text : 'No text response';
 
-      console.log('[CLAUDE RAW RESPONSE]');
-      console.log(claudeText);
-      console.log('[END CLAUDE RESPONSE]');
+    console.log('[CLAUDE RAW RESPONSE]');
+    console.log(claudeText);
+    console.log('[END CLAUDE RESPONSE]');
 
-      // Option B: create branch + placeholder commit + PR
-      try {
-        const prUrl = await createFixPR(claudeText, testError.type);
-        console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
-      } catch (prErr: unknown) {
-        const err = prErr instanceof Error ? prErr : new Error(String(prErr));
-        console.error('[PR ERROR]:', err.message);
-      }
+    const prUrl = await createFixPR(claudeText, error.type);
+    console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
 
-    } catch (claudeErr: unknown) {
-      const err = claudeErr instanceof Error ? claudeErr : new Error(String(claudeErr));
-      console.error('[CLAUDE ERROR]:', err.message);
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    console.error('[handleError] Failed:', e.message);
+  }
+}
+
+async function main(): Promise<void> {
+  console.log('[Coordinator] Boot confirmed - memory-v2 starting');
+
+  // Boot-time smoke test — confirms memory + embedding only, no PR created
+  try {
+    const smokeError: ErrorMemory = {
+      timestamp: new Date().toISOString(),
+      type: 'SmokeTest',
+      message: 'boot smoke test — memory check only',
+      details: { file: 'index.ts', line: 0 },
+    };
+
+    const id = await upsertPoint(smokeError);
+    console.log(`[Smoke] Upserted point ID: ${id}`);
+
+    const matches = await searchSimilarLogs('boot smoke test memory check');
+    console.log(`[Smoke] Recall found ${matches.length} matches`);
+
+    if (matches.length > 0) {
+      console.log(`[Smoke] Best score: ${matches[0].score}`);
     }
 
-  } catch (e) {
-    console.error('[ERROR] Test failed:', e);
+    console.log('[Smoke] Memory layer confirmed OK — no PR created on boot');
+
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.error('[Smoke] Memory check failed:', err.message);
   }
 
   http.createServer((req, res) => {
