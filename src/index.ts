@@ -104,6 +104,48 @@ async function callQABot(
   }
 }
 
+async function callCoderBot(fix: FixSuggestion): Promise<{ branch: string; commitSha: string }> {
+  const coderUrl = process.env.CODER_BOT_URL;
+
+  if (!coderUrl) {
+    throw new Error('CODER_BOT_URL environment variable not set');
+  }
+
+  console.log('[Coder] Sending fix to Coder Bot...');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(`${coderUrl}/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fix }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    const result = await response.json() as
+      | { status: 'ok'; branch: string; commitSha: string; message: string }
+      | { status: 'error'; reason: string };
+
+    if (result.status === 'error') {
+      throw new Error(`Coder Bot rejected fix: ${result.reason}`);
+    }
+
+    console.log(`[Coder] Success — branch: ${result.branch}, commit: ${result.commitSha}`);
+    return { branch: result.branch, commitSha: result.commitSha };
+
+  } catch (err: unknown) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Coder Bot request timed out after 30s');
+    }
+    throw err;
+  }
+}
+
 export async function handleError(error: ErrorMemory): Promise<void> {
   console.log(`[handleError] Processing: ${error.type} — ${error.message}`);
 
@@ -162,7 +204,7 @@ Respond with ONLY a JSON object in this exact format, no other text:
       return;
     }
 
-    // QA Bot review before PR creation
+    // QA Bot review before any file edits
     const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
     const qaResult = await callQABot(fixJson, tempPrUrl);
 
@@ -171,11 +213,24 @@ Respond with ONLY a JSON object in this exact format, no other text:
       return;
     }
 
-    console.log('[INFO] QA passed — proceeding with PR creation');
+    console.log('[INFO] QA passed — sending to Coder Bot');
 
+    // Coder Bot applies real file edit and creates branch
+    let branch: string;
+    try {
+      const coderResult = await callCoderBot(fixJson);
+      branch = coderResult.branch;
+    } catch (coderErr: unknown) {
+      const e = coderErr instanceof Error ? coderErr : new Error(String(coderErr));
+      console.error(`[CODER ERROR] ${e.message}`);
+      return;
+    }
+
+    // Open PR against the real branch Coder Bot created
     const prUrl = await createFixPR(
       `${fixJson.description}\n\n\`\`\`\nFile: ${fixJson.file}\nLine: ${fixJson.line}\nAction: ${fixJson.action}\nNew content: ${fixJson.newContent}\n\`\`\``,
-      error.type
+      error.type,
+      branch
     );
     console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
 
