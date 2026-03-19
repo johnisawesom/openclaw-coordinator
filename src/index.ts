@@ -157,7 +157,11 @@ export async function handleError(error: ErrorMemory): Promise<void> {
 
     const context = matches
       .filter(m => m.score > 0.65)
-      .map(m => `Past similar (score ${m.score.toFixed(3)}): ${JSON.stringify(m.payload)}`)
+      .slice(0, 3)
+      .map(m => {
+        const payload = JSON.stringify(m.payload).slice(0, 200);
+        return `Past similar (score ${m.score.toFixed(3)}): ${payload}`;
+      })
       .join('\n\n');
 
     const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
