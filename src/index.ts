@@ -61,6 +61,49 @@ function parseFixSuggestion(raw: string): FixSuggestion {
   };
 }
 
+async function callQABot(
+  fix: FixSuggestion,
+  prUrl: string
+): Promise<{ status: 'PASS' | 'FAIL'; reason: string }> {
+  const qaUrl = process.env.QA_BOT_URL;
+
+  if (!qaUrl) {
+    console.warn('[QA] QA_BOT_URL not set — blocking PR as safe default');
+    return { status: 'FAIL', reason: 'QA_BOT_URL environment variable not set' };
+  }
+
+  console.log('[QA] Sending fix for review...');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(`${qaUrl}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prUrl, fix }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    const result = await response.json() as { status: 'PASS' | 'FAIL'; reason: string };
+    console.log(`[QA] ${result.status} — ${result.reason}`);
+    return result;
+
+  } catch (err: unknown) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.warn('[QA] Request timed out after 10s — blocking PR as safe default');
+      return { status: 'FAIL', reason: 'QA Bot request timed out' };
+    }
+    console.warn(
+      `[QA] Request failed — blocking PR as safe default: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return { status: 'FAIL', reason: 'QA Bot unreachable' };
+  }
+}
+
 export async function handleError(error: ErrorMemory): Promise<void> {
   console.log(`[handleError] Processing: ${error.type} — ${error.message}`);
 
@@ -118,6 +161,17 @@ Respond with ONLY a JSON object in this exact format, no other text:
       console.error('[PARSE ERROR] Raw response was:', claudeText);
       return;
     }
+
+    // QA Bot review before PR creation
+    const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
+    const qaResult = await callQABot(fixJson, tempPrUrl);
+
+    if (qaResult.status === 'FAIL') {
+      console.warn(`[WARN] PR blocked by QA Bot — ${qaResult.reason}`);
+      return;
+    }
+
+    console.log('[INFO] QA passed — proceeding with PR creation');
 
     const prUrl = await createFixPR(
       `${fixJson.description}\n\n\`\`\`\nFile: ${fixJson.file}\nLine: ${fixJson.line}\nAction: ${fixJson.action}\nNew content: ${fixJson.newContent}\n\`\`\``,
