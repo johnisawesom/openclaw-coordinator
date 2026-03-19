@@ -1,6 +1,6 @@
 // src/index.ts
 import http from 'http';
-import { upsertPoint, searchSimilarLogs, ErrorMemory } from './qdrant-logger.js';
+import { upsertPoint, searchSimilarLogs, compactSmokeTests, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
@@ -277,6 +277,21 @@ async function main(): Promise<void> {
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.1.0' }));
+      return;
+    }
+
+    // Compact endpoint — deletes SmokeTest entries older than 7 days
+    if (req.method === 'POST' && req.url === '/compact') {
+      console.log('[Compact] /compact triggered');
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'accepted', message: 'Compaction running — watch logs' }));
+
+      compactSmokeTests().then(result => {
+        console.log(`[Compact] Complete — deleted: ${result.deleted}, kept: ${result.kept}`);
+      }).catch((err: unknown) => {
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.error('[Compact] Failed:', e.message);
+      });
       return;
     }
 
