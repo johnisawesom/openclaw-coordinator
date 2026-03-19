@@ -213,10 +213,47 @@ async function main(): Promise<void> {
     console.error('[Smoke] Memory check failed:', err.message);
   }
 
-  http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-  }).listen(PORT, '0.0.0.0', () => console.log(`[Health] Server on port ${PORT}`));
+  const server = http.createServer((req, res) => {
+    // Health check
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.1.0' }));
+      return;
+    }
+
+    // Test endpoint — triggers handleError() with a fake error
+    if (req.method === 'POST' && req.url === '/test-error') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', () => {
+        let testError: ErrorMemory;
+        try {
+          testError = JSON.parse(body) as ErrorMemory;
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+          return;
+        }
+
+        console.log('[TEST] /test-error triggered');
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'accepted', message: 'handleError() fired — watch logs' }));
+
+        // Fire and forget — response already sent
+        handleError(testError).catch((err: unknown) => {
+          const e = err instanceof Error ? err : new Error(String(err));
+          console.error('[TEST] handleError threw:', e.message);
+        });
+      });
+      return;
+    }
+
+    // 404 for everything else
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  });
+
+  server.listen(PORT, '0.0.0.0', () => console.log(`[Health] Server on port ${PORT}`));
 }
 
 main().catch(console.error);
