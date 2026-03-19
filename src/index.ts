@@ -39,7 +39,7 @@ function parseFixSuggestion(raw: string): FixSuggestion {
     typeof (parsed as Record<string, unknown>).newContent !== 'string' ||
     typeof (parsed as Record<string, unknown>).description !== 'string'
   ) {
-    throw new Error('Missing or invalid fields in Claude JSON response');
+  const results = (data ?? []).map(
   }
 
   const candidate = parsed as Record<string, unknown>;
