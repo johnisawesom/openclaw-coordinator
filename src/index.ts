@@ -70,6 +70,15 @@ Output ONLY the suggestion (no extra text).`;
       console.log(claudeText);
       console.log('[END CLAUDE RESPONSE]');
 
+      // Option B: create branch + placeholder commit + PR
+      try {
+        const prUrl = await createFixPR(claudeText, testError.type);
+        console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
+      } catch (prErr: unknown) {
+        const err = prErr instanceof Error ? prErr : new Error(String(prErr));
+        console.error('[PR ERROR]:', err.message);
+      }
+
     } catch (claudeErr: unknown) {
       const err = claudeErr instanceof Error ? claudeErr : new Error(String(claudeErr));
       console.error('[CLAUDE ERROR]:', err.message);
