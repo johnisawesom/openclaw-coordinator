@@ -1,6 +1,7 @@
 import http from 'http';
 import crypto from 'crypto';
 import { upsertPoint, searchSimilarLogs, compactSmokeTests, updateConfidence, ErrorMemory } from './qdrant-logger.js';
+import { writeToEcosystem, searchEcosystem } from './ecosystem-memory.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
@@ -153,14 +154,37 @@ export async function handleError(error: ErrorMemory): Promise<void> {
     const id = await upsertPoint(error);
     console.log(`[handleError] Upserted point ID: ${id}`);
 
-    const matches = await searchSimilarLogs(error.message);
+    writeToEcosystem({
+      bot: 'coordinator',
+      type: error.type,
+      title: `${error.type}: ${error.message}`,
+      content: JSON.stringify(error.details || {}),
+      timestamp: error.timestamp || new Date().toISOString(),
+      metadata: { pointId: id },
+    }).catch((err: unknown) => {
+      const e = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[Ecosystem] Write failed — not blocking handleError: ${e.message}`);
+    });
 
-    const context = matches
+    const [matches, ecosystemMatches] = await Promise.all([
+      searchSimilarLogs(error.message),
+      searchEcosystem(error.message),
+    ]);
+
+    const localContext = matches
       .filter(m => m.score > 0.65 && (m.payload.confidence ?? 0.5) > 0.3)
       .slice(0, 3)
       .map(m => {
         const payload = JSON.stringify(m.payload).slice(0, 200);
-        return `Past similar (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
+        return `Past fix (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
+      })
+      .join('\n\n');
+
+    const ecosystemContext = ecosystemMatches
+      .slice(0, 2)
+      .map(e => {
+        const snippet = e.content.slice(0, 150);
+        return `Cross-bot insight (${e.bot}): ${e.title} — ${snippet}`;
       })
       .join('\n\n');
 
@@ -171,7 +195,10 @@ ${error.type}: ${error.message}
 Details: ${JSON.stringify(error.details)}
 
 Past similar fixes:
-${context || '(none found)'}
+${localContext || '(none found)'}
+
+Cross-bot ecosystem insights:
+${ecosystemContext || '(none found)'}
 
 Respond with ONLY a JSON object in this exact format, no other text:
 {
@@ -288,7 +315,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.2.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.3.0' }));
       return;
     }
 
