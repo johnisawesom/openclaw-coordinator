@@ -1,28 +1,19 @@
+### `src/qdrant-logger.ts` — embedder version
+
+```typescript
 // src/qdrant-logger.ts
-// FINAL FIX — 2GB + offline xenova non-quantized singleton — full 384 semantic recall
-import { pipeline } from '@xenova/transformers';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
-let embeddingPipeline: any = null;
 
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL!,
   apiKey: process.env.QDRANT_API_KEY!,
 });
 
-const COLLECTION_NAME = 'coordinator_logs';
-
-async function getPipeline() {
-  if (!embeddingPipeline) {
-    console.log('[INFO] Loading embedding model (first boot only — 2GB required)');
-    embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    console.log('[INFO] Model loaded successfully');
-  }
-  return embeddingPipeline;
-}
+const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'coordinator_logs';
+const EMBEDDER_URL = process.env.EMBEDDER_URL!;
 
 export interface ErrorMemory {
   timestamp: string;
@@ -34,17 +25,25 @@ export interface ErrorMemory {
 }
 
 export async function getEmbedding(text: string): Promise<number[]> {
-  const pipe = await getPipeline();
-  const output = await pipe(text, {
-    pooling: 'mean',
-    normalize: true
+  const response = await fetch(`${EMBEDDER_URL}/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
   });
-  const embedding = Array.from(output.data) as number[];
-  console.log(`[DEBUG] Embedding length: ${embedding.length}`);
-  if (embedding.length !== 384) {
-    throw new Error(`Vector dimension error: expected 384, got ${embedding.length}`);
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Embedder returned ${response.status}: ${body}`);
   }
-  return embedding;
+
+  const result = await response.json() as { vector: number[] };
+
+  if (!Array.isArray(result.vector) || result.vector.length !== 384) {
+    throw new Error(`Embedder returned invalid vector length: ${result.vector?.length}`);
+  }
+
+  console.log(`[DEBUG] Embedding length: ${result.vector.length}`);
+  return result.vector;
 }
 
 export async function upsertPoint(memory: ErrorMemory): Promise<string> {
@@ -128,3 +127,4 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
   console.log(`[Compact] Done — deleted: ${toDelete.length}, kept: ${kept}`);
   return { deleted: toDelete.length, kept };
 }
+```
