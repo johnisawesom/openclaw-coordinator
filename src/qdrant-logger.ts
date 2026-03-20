@@ -1,6 +1,5 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
-
 dotenv.config();
 
 const qdrantClient = new QdrantClient({
@@ -26,18 +25,14 @@ export async function getEmbedding(text: string): Promise<number[]> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
   });
-
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Embedder returned ${response.status}: ${body}`);
   }
-
   const result = await response.json() as { vector: number[] };
-
   if (!Array.isArray(result.vector) || result.vector.length !== 384) {
     throw new Error(`Embedder returned invalid vector length: ${result.vector?.length}`);
   }
-
   console.log(`[DEBUG] Embedding length: ${result.vector.length}`);
   return result.vector;
 }
@@ -50,8 +45,12 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
     points: [{
       id: pointId,
       vector,
-      payload: { ...memory, timestamp: memory.timestamp || new Date().toISOString() }
-    }]
+      payload: {
+        ...memory,
+        timestamp: memory.timestamp || new Date().toISOString(),
+        confidence: memory.confidence ?? 0.5,
+      },
+    }],
   });
   console.log(`[SUCCESS] upsertPoint id=${pointId}`);
   return pointId.toString();
@@ -63,19 +62,57 @@ export async function searchSimilarLogs(query: string, limit = 5) {
     vector,
     limit,
     score_threshold: 0.65,
-    with_payload: true
+    with_payload: true,
   });
   console.log(`[SUCCESS] searchSimilarLogs — found ${results.length} matches (score > 0.65)`);
   return results.map(r => ({
     score: r.score,
-    payload: r.payload as unknown as ErrorMemory
+    payload: r.payload as unknown as ErrorMemory,
   }));
+}
+
+export async function updateConfidence(prUrl: string, confidence: number): Promise<void> {
+  console.log(`[Confidence] Updating prUrl=${prUrl} to confidence=${confidence}`);
+  let offset: number | undefined = undefined;
+  let updated = 0;
+
+  while (true) {
+    const response = await qdrantClient.scroll(COLLECTION_NAME, {
+      filter: {
+        must: [{
+          key: 'fixPrUrl',
+          match: { value: prUrl },
+        }],
+      },
+      limit: 100,
+      offset,
+      with_payload: false,
+      with_vector: false,
+    });
+
+    for (const point of response.points) {
+      await qdrantClient.setPayload(COLLECTION_NAME, {
+        payload: { confidence },
+        points: [point.id as number],
+      });
+      updated++;
+      console.log(`[Confidence] Updated point id=${point.id} confidence=${confidence}`);
+    }
+
+    if (response.next_page_offset == null) break;
+    offset = response.next_page_offset as number;
+  }
+
+  if (updated === 0) {
+    console.warn(`[Confidence] No point found with fixPrUrl=${prUrl} — nothing updated`);
+  } else {
+    console.log(`[Confidence] Done — updated ${updated} point(s)`);
+  }
 }
 
 export async function compactSmokeTests(): Promise<{ deleted: number; kept: number }> {
   const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   console.log(`[Compact] Scanning for SmokeTest entries older than ${cutoff}`);
-
   const toDelete: number[] = [];
   let kept = 0;
   let offset: number | undefined = undefined;
@@ -83,12 +120,10 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
   while (true) {
     const response = await qdrantClient.scroll(COLLECTION_NAME, {
       filter: {
-        must: [
-          {
-            key: 'type',
-            match: { value: 'SmokeTest' },
-          },
-        ],
+        must: [{
+          key: 'type',
+          match: { value: 'SmokeTest' },
+        }],
       },
       limit: 100,
       offset,
@@ -105,16 +140,12 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
       }
     }
 
-    if (response.next_page_offset == null) {
-      break;
-    }
+    if (response.next_page_offset == null) break;
     offset = response.next_page_offset as number;
   }
 
   if (toDelete.length > 0) {
-    await qdrantClient.delete(COLLECTION_NAME, {
-      points: toDelete,
-    });
+    await qdrantClient.delete(COLLECTION_NAME, { points: toDelete });
     console.log(`[Compact] Deleted ${toDelete.length} old SmokeTest points`);
   } else {
     console.log('[Compact] No old SmokeTest points to delete');
