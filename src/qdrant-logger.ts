@@ -1,7 +1,3 @@
-### `src/qdrant-logger.ts` — embedder version
-
-```typescript
-// src/qdrant-logger.ts
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
 
@@ -127,4 +123,3 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
   console.log(`[Compact] Done — deleted: ${toDelete.length}, kept: ${kept}`);
   return { deleted: toDelete.length, kept };
 }
-```
