@@ -1,6 +1,6 @@
-// src/index.ts
 import http from 'http';
-import { upsertPoint, searchSimilarLogs, compactSmokeTests, ErrorMemory } from './qdrant-logger.js';
+import crypto from 'crypto';
+import { upsertPoint, searchSimilarLogs, compactSmokeTests, updateConfidence, ErrorMemory } from './qdrant-logger.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
@@ -156,11 +156,11 @@ export async function handleError(error: ErrorMemory): Promise<void> {
     const matches = await searchSimilarLogs(error.message);
 
     const context = matches
-      .filter(m => m.score > 0.65)
+      .filter(m => m.score > 0.65 && (m.payload.confidence ?? 0.5) > 0.3)
       .slice(0, 3)
       .map(m => {
         const payload = JSON.stringify(m.payload).slice(0, 200);
-        return `Past similar (score ${m.score.toFixed(3)}): ${payload}`;
+        return `Past similar (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
       })
       .join('\n\n');
 
@@ -208,7 +208,6 @@ Respond with ONLY a JSON object in this exact format, no other text:
       return;
     }
 
-    // QA Bot review before any file edits
     const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
     const qaResult = await callQABot(fixJson, tempPrUrl);
 
@@ -219,7 +218,6 @@ Respond with ONLY a JSON object in this exact format, no other text:
 
     console.log('[INFO] QA passed — sending to Coder Bot');
 
-    // Coder Bot applies real file edit and creates branch
     let branch: string;
     try {
       const coderResult = await callCoderBot(fixJson);
@@ -230,7 +228,6 @@ Respond with ONLY a JSON object in this exact format, no other text:
       return;
     }
 
-    // Open PR against the real branch Coder Bot created
     const prUrl = await createFixPR(
       `${fixJson.description}\n\n\`\`\`\nFile: ${fixJson.file}\nLine: ${fixJson.line}\nAction: ${fixJson.action}\nNew content: ${fixJson.newContent}\n\`\`\``,
       error.type,
@@ -241,6 +238,21 @@ Respond with ONLY a JSON object in this exact format, no other text:
   } catch (err: unknown) {
     const e = err instanceof Error ? err : new Error(String(err));
     console.error('[handleError] Failed:', e.message);
+  }
+}
+
+function verifyWebhookSignature(body: string, signature: string, secret: string): boolean {
+  const expected = `sha256=${crypto
+    .createHmac('sha256', secret)
+    .update(body, 'utf8')
+    .digest('hex')}`;
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(expected, 'utf8'),
+      Buffer.from(signature, 'utf8')
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -273,14 +285,13 @@ async function main(): Promise<void> {
   }
 
   const server = http.createServer((req, res) => {
-    // Health check
+
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.1.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.2.0' }));
       return;
     }
 
-    // Compact endpoint — deletes SmokeTest entries older than 7 days
     if (req.method === 'POST' && req.url === '/compact') {
       console.log('[Compact] /compact triggered');
       res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -295,7 +306,78 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Test endpoint — triggers handleError() with a fake error
+    if (req.method === 'POST' && req.url === '/webhook') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', () => {
+        const signature = req.headers['x-hub-signature-256'] as string | undefined;
+        const secret = process.env.GITHUB_WEBHOOK_SECRET;
+
+        if (!secret) {
+          console.error('[Webhook] GITHUB_WEBHOOK_SECRET not set — rejecting');
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Webhook secret not configured' }));
+          return;
+        }
+
+        if (!signature) {
+          console.warn('[Webhook] Missing X-Hub-Signature-256 header — rejecting');
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing signature' }));
+          return;
+        }
+
+        if (!verifyWebhookSignature(body, signature, secret)) {
+          console.warn('[Webhook] Signature mismatch — rejecting');
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid signature' }));
+          return;
+        }
+
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(body) as Record<string, unknown>;
+        } catch {
+          console.warn('[Webhook] Invalid JSON body');
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          return;
+        }
+
+        const action = payload.action as string | undefined;
+        const pr = payload.pull_request as Record<string, unknown> | undefined;
+
+        if (action !== 'closed' || !pr) {
+          console.log(`[Webhook] Ignoring event — action=${action ?? 'unknown'}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ignored' }));
+          return;
+        }
+
+        const merged = pr.merged as boolean | undefined;
+        const prUrl = pr.html_url as string | undefined;
+
+        if (!prUrl) {
+          console.warn('[Webhook] No html_url in pull_request payload');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ignored', reason: 'no prUrl' }));
+          return;
+        }
+
+        const confidence = merged === true ? 1.0 : 0.0;
+        console.log(`[Webhook] PR closed — merged=${merged} confidence=${confidence} url=${prUrl}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'accepted' }));
+
+        updateConfidence(prUrl, confidence).catch((err: unknown) => {
+          const e = err instanceof Error ? err : new Error(String(err));
+          console.error('[Webhook] updateConfidence failed:', e.message);
+        });
+      });
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/test-error') {
       let body = '';
       req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
@@ -313,7 +395,6 @@ async function main(): Promise<void> {
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'accepted', message: 'handleError() fired — watch logs' }));
 
-        // Fire and forget — response already sent
         handleError(testError).catch((err: unknown) => {
           const e = err instanceof Error ? err : new Error(String(err));
           console.error('[TEST] handleError threw:', e.message);
@@ -322,7 +403,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    // 404 for everything else
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   });
