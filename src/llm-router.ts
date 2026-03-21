@@ -81,6 +81,7 @@ async function callAnthropic(
         console.warn(`[LLM] ${task} → ${model} rate limit exhausted after 3 attempts — switching to fallback`);
         throw new Error('RATE_LIMIT_EXHAUSTED');
       }
+      console.error(`[LLM] ${task} → ${model} non-rate-limit error: status=${error.status ?? 'none'} message=${error.message ?? 'unknown'}`);
       throw err;
     }
   }
