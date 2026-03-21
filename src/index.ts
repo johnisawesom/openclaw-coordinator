@@ -1,6 +1,6 @@
 import http from 'http';
 import crypto from 'crypto';
-import { upsertPoint, searchSimilarLogs, compactSmokeTests, updateConfidence, ErrorMemory } from './qdrant-logger.js';
+import { upsertPoint, searchSimilarLogs, compactSmokeTests, updateConfidence, ErrorMemory, RecallMatch } from './qdrant-logger.js';
 import { writeToEcosystem, searchEcosystem } from './ecosystem-memory.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
@@ -148,12 +148,57 @@ async function callCoderBot(fix: FixSuggestion): Promise<{ branch: string; commi
   }
 }
 
+function buildRecallContext(matches: RecallMatch[], ecosystemMatches: ReturnType<typeof Array.prototype.map>): {
+  localContext: string;
+  ecosystemContext: string;
+  tier1Count: number;
+  tier2Count: number;
+  ecosystemCount: number;
+} {
+  const tier1 = matches.filter(m => m.tier === 1);
+  const tier2 = matches.filter(m => m.tier === 2 && (m.payload.confidence ?? 0.5) > 0.3);
+
+  // Tier 1 first — up to 3 validated fixes
+  // Tier 2 fills gaps only if tier 1 has fewer than 2
+  const selectedTier1 = tier1.slice(0, 3);
+  const tier2Slots = Math.max(0, 2 - selectedTier1.length);
+  const selectedTier2 = tier2Slots > 0 ? tier2.slice(0, tier2Slots) : [];
+
+  const selected = [...selectedTier1, ...selectedTier2];
+
+  const localContext = selected
+    .map(m => {
+      const payload = JSON.stringify(m.payload).slice(0, 200);
+      const tierLabel = m.tier === 1 ? 'validated' : 'unvalidated';
+      return `Past fix [${tierLabel}] (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
+    })
+    .join('\n\n');
+
+  const selectedEcosystem = (ecosystemMatches as Array<{ bot: string; title: string; content: string }>).slice(0, 2);
+  const ecosystemContext = selectedEcosystem
+    .map(e => {
+      const snippet = e.content.slice(0, 150);
+      return `Cross-bot insight (${e.bot}): ${e.title} — ${snippet}`;
+    })
+    .join('\n\n');
+
+  return {
+    localContext,
+    ecosystemContext,
+    tier1Count: selectedTier1.length,
+    tier2Count: selectedTier2.length,
+    ecosystemCount: selectedEcosystem.length,
+  };
+}
+
 export async function handleError(error: ErrorMemory): Promise<void> {
-  console.log(`[handleError] Processing: ${error.type} — ${error.message}`);
+  console.log(`[Decision] ========== handleError start ==========`);
+  console.log(`[Decision] Error type: ${error.type}`);
+  console.log(`[Decision] Error message: ${error.message}`);
 
   try {
     const id = await upsertPoint(error);
-    console.log(`[handleError] Upserted point ID: ${id}`);
+    console.log(`[Decision] Upserted to coordinator_logs — point ID: ${id}`);
 
     writeToEcosystem({
       bot: 'coordinator',
@@ -172,22 +217,12 @@ export async function handleError(error: ErrorMemory): Promise<void> {
       searchEcosystem(error.message),
     ]);
 
-    const localContext = matches
-      .filter(m => m.score > 0.65 && (m.payload.confidence ?? 0.5) > 0.3)
-      .slice(0, 3)
-      .map(m => {
-        const payload = JSON.stringify(m.payload).slice(0, 200);
-        return `Past fix (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
-      })
-      .join('\n\n');
+    const { localContext, ecosystemContext, tier1Count, tier2Count, ecosystemCount } =
+      buildRecallContext(matches, ecosystemMatches);
 
-    const ecosystemContext = ecosystemMatches
-      .slice(0, 2)
-      .map(e => {
-        const snippet = e.content.slice(0, 150);
-        return `Cross-bot insight (${e.bot}): ${e.title} — ${snippet}`;
-      })
-      .join('\n\n');
+    console.log(`[Decision] Recall tier1(validated): ${tier1Count} tier2(unvalidated): ${tier2Count} ecosystem: ${ecosystemCount}`);
+    console.log(`[Decision] Proceeding to Claude with ${tier1Count + tier2Count} local + ${ecosystemCount} ecosystem context items`);
+    console.log(`[Decision] Model: claude-sonnet-4-6`);
 
     const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
 
@@ -228,7 +263,7 @@ Respond with ONLY a JSON object in this exact format, no other text:
     let fixJson: FixSuggestion;
     try {
       fixJson = parseFixSuggestion(claudeText);
-      console.log('[INFO] Structured fix parsed:', JSON.stringify(fixJson));
+      console.log(`[Decision] Fix parsed — file: ${fixJson.file} line: ${fixJson.line} action: ${fixJson.action}`);
     } catch (parseErr: unknown) {
       const e = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
       console.error('[PARSE ERROR] Claude did not return valid JSON:', e.message);
@@ -237,22 +272,25 @@ Respond with ONLY a JSON object in this exact format, no other text:
     }
 
     const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
+    console.log(`[Decision] Sending to QA Bot for review`);
     const qaResult = await callQABot(fixJson, tempPrUrl);
+    console.log(`[Decision] QA result: ${qaResult.status} — ${qaResult.reason}`);
 
     if (qaResult.status === 'FAIL') {
-      console.warn(`[WARN] PR blocked by QA Bot — ${qaResult.reason}`);
+      console.warn(`[Decision] PR blocked by QA Bot — stopping`);
       return;
     }
 
-    console.log('[INFO] QA passed — sending to Coder Bot');
+    console.log(`[Decision] QA passed — sending to Coder Bot`);
 
     let branch: string;
     try {
       const coderResult = await callCoderBot(fixJson);
       branch = coderResult.branch;
+      console.log(`[Decision] Coder Bot success — branch: ${branch}`);
     } catch (coderErr: unknown) {
       const e = coderErr instanceof Error ? coderErr : new Error(String(coderErr));
-      console.error(`[CODER ERROR] ${e.message}`);
+      console.error(`[Decision] Coder Bot failed: ${e.message}`);
       return;
     }
 
@@ -261,7 +299,8 @@ Respond with ONLY a JSON object in this exact format, no other text:
       error.type,
       branch
     );
-    console.log(`[SUCCESS] Fix PR ready for review: ${prUrl}`);
+    console.log(`[Decision] PR opened: ${prUrl}`);
+    console.log(`[Decision] ========== handleError complete ==========`);
 
   } catch (err: unknown) {
     const e = err instanceof Error ? err : new Error(String(err));
@@ -308,7 +347,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.4.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.5.0' }));
       return;
     }
 
