@@ -14,17 +14,13 @@ import {
 } from './qdrant-logger.js';
 import { writeToEcosystem, searchEcosystem, EcosystemEntry } from './ecosystem-memory.js';
 import { createFixPR, createAlertIssue } from './github-client.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { callLLM } from './llm-router.js';
 import dotenv from 'dotenv';
 dotenv.config();
 console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
 
 interface FixSuggestion {
   file: string;
@@ -52,7 +48,7 @@ function parseFixSuggestion(raw: string): FixSuggestion {
     typeof (parsed as Record<string, unknown>).newContent !== 'string' ||
     typeof (parsed as Record<string, unknown>).description !== 'string'
   ) {
-    throw new Error('Missing or invalid fields in Claude JSON response');
+    throw new Error('Missing or invalid fields in LLM JSON response');
   }
 
   const candidate = parsed as Record<string, unknown>;
@@ -232,8 +228,8 @@ export async function handleError(error: ErrorMemory): Promise<void> {
       buildRecallContext(matches, ecosystemMatches);
 
     console.log(`[Decision] Recall tier1(validated): ${tier1Count} tier2(unvalidated): ${tier2Count} ecosystem: ${ecosystemCount}`);
-    console.log(`[Decision] Proceeding to Claude with ${tier1Count + tier2Count} local + ${ecosystemCount} ecosystem context items`);
-    console.log(`[Decision] Model: claude-sonnet-4-6`);
+    console.log(`[Decision] Proceeding to LLM with ${tier1Count + tier2Count} local + ${ecosystemCount} ecosystem context items`);
+    console.log(`[Decision] Model: claude-haiku-3-5-20241022 (primary) gemini-1.5-flash (fallback)`);
 
     const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
 
@@ -256,29 +252,53 @@ Respond with ONLY a JSON object in this exact format, no other text:
   "description": "<one sentence explaining the fix>"
 }`;
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 200,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    let llmText: string;
+    try {
+      const llmResponse = await callLLM({
+        task: 'fix_suggestion',
+        prompt,
+        systemPrompt: `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
+Analyse the error and return ONLY valid JSON with this exact structure:
+{
+  "file": "src/filename.ts",
+  "line": 42,
+  "action": "delete_line" | "replace_line" | "insert_after",
+  "newContent": "the corrected line of code",
+  "description": "one sentence explaining the fix"
+}
+Valid actions: delete_line, replace_line, insert_after. No explanation outside the JSON.`,
+        maxTokens: 200,
+      });
+      llmText = llmResponse.text;
+      console.log(`[Decision] LLM responded via ${llmResponse.provider} using ${llmResponse.model}`);
+    } catch (llmErr: unknown) {
+      const e = llmErr instanceof Error ? llmErr : new Error(String(llmErr));
+      if (e.message.startsWith('LLM_BOTH_FAILED')) {
+        console.error(`[Decision] LLM_BOTH_FAILED — both providers exhausted, logging to memory`);
+        await upsertPoint({
+          timestamp: new Date().toISOString(),
+          type: 'LLMFailure',
+          message: 'Both LLM providers failed during fix_suggestion',
+          details: { originalError: error.message, originalType: error.type },
+        });
+      } else {
+        console.error(`[Decision] LLM call failed: ${e.message}`);
+      }
+      return;
+    }
 
-    const textBlock = response.content.find(
-      (block): block is Anthropic.TextBlock => block.type === 'text'
-    );
-    const claudeText = textBlock ? textBlock.text : '';
-
-    console.log('[CLAUDE RAW RESPONSE]');
-    console.log(claudeText);
-    console.log('[END CLAUDE RESPONSE]');
+    console.log('[LLM RAW RESPONSE]');
+    console.log(llmText);
+    console.log('[END LLM RESPONSE]');
 
     let fixJson: FixSuggestion;
     try {
-      fixJson = parseFixSuggestion(claudeText);
+      fixJson = parseFixSuggestion(llmText);
       console.log(`[Decision] Fix parsed — file: ${fixJson.file} line: ${fixJson.line} action: ${fixJson.action}`);
     } catch (parseErr: unknown) {
       const e = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
-      console.error('[PARSE ERROR] Claude did not return valid JSON:', e.message);
-      console.error('[PARSE ERROR] Raw response was:', claudeText);
+      console.error('[PARSE ERROR] LLM did not return valid JSON:', e.message);
+      console.error('[PARSE ERROR] Raw response was:', llmText);
       return;
     }
 
@@ -394,7 +414,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.7.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.8.0' }));
       return;
     }
 
