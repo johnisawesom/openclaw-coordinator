@@ -21,6 +21,12 @@ export interface ErrorMemory {
   ecosystemVersion?: string;
 }
 
+export interface RecallMatch {
+  score: number;
+  tier: 1 | 2;
+  payload: ErrorMemory;
+}
+
 export async function getEmbedding(text: string): Promise<number[]> {
   const response = await fetch(`${EMBEDDER_URL}/embed`, {
     method: 'POST',
@@ -63,7 +69,7 @@ export async function upsertPoint(
   return pointId.toString();
 }
 
-export async function searchSimilarLogs(query: string, limit = 5) {
+export async function searchSimilarLogs(query: string, limit = 10): Promise<RecallMatch[]> {
   const vector = await getEmbedding(query);
   const results = await qdrantClient.search(COLLECTION_NAME, {
     vector,
@@ -71,11 +77,19 @@ export async function searchSimilarLogs(query: string, limit = 5) {
     score_threshold: 0.65,
     with_payload: true,
   });
-  console.log(`[SUCCESS] searchSimilarLogs — found ${results.length} matches (score > 0.65)`);
-  return results.map(r => ({
-    score: r.score,
-    payload: r.payload as unknown as ErrorMemory,
-  }));
+
+  const matches: RecallMatch[] = results.map(r => {
+    const payload = r.payload as unknown as ErrorMemory;
+    const confidence = payload.confidence ?? 0.5;
+    const tier: 1 | 2 = confidence >= 1.0 ? 1 : 2;
+    return { score: r.score, tier, payload };
+  });
+
+  const tier1 = matches.filter(m => m.tier === 1);
+  const tier2 = matches.filter(m => m.tier === 2 && m.payload.confidence !== 0.0);
+
+  console.log(`[Recall] Raw matches: ${results.length} — tier1(validated): ${tier1.length} tier2(unvalidated): ${tier2.length}`);
+  return matches;
 }
 
 export async function updateConfidence(prUrl: string, confidence: number): Promise<void> {
