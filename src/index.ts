@@ -1,6 +1,6 @@
 import http from 'http';
 import crypto from 'crypto';
-import { upsertPoint, searchSimilarLogs, compactSmokeTests, updateConfidence, ErrorMemory, RecallMatch } from './qdrant-logger.js';
+import { upsertPoint, searchSimilarLogs, compactSmokeTests, compactEcosystemMemory, collectMemoryMetrics, updateConfidence, ErrorMemory, RecallMatch } from './qdrant-logger.js';
 import { writeToEcosystem, searchEcosystem } from './ecosystem-memory.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createFixPR } from './github-client.js';
@@ -148,7 +148,10 @@ async function callCoderBot(fix: FixSuggestion): Promise<{ branch: string; commi
   }
 }
 
-function buildRecallContext(matches: RecallMatch[], ecosystemMatches: ReturnType<typeof Array.prototype.map>): {
+function buildRecallContext(
+  matches: RecallMatch[],
+  ecosystemMatches: Array<{ bot: string; title: string; content: string }>
+): {
   localContext: string;
   ecosystemContext: string;
   tier1Count: number;
@@ -158,8 +161,6 @@ function buildRecallContext(matches: RecallMatch[], ecosystemMatches: ReturnType
   const tier1 = matches.filter(m => m.tier === 1);
   const tier2 = matches.filter(m => m.tier === 2 && (m.payload.confidence ?? 0.5) > 0.3);
 
-  // Tier 1 first — up to 3 validated fixes
-  // Tier 2 fills gaps only if tier 1 has fewer than 2
   const selectedTier1 = tier1.slice(0, 3);
   const tier2Slots = Math.max(0, 2 - selectedTier1.length);
   const selectedTier2 = tier2Slots > 0 ? tier2.slice(0, tier2Slots) : [];
@@ -174,7 +175,7 @@ function buildRecallContext(matches: RecallMatch[], ecosystemMatches: ReturnType
     })
     .join('\n\n');
 
-  const selectedEcosystem = (ecosystemMatches as Array<{ bot: string; title: string; content: string }>).slice(0, 2);
+  const selectedEcosystem = ecosystemMatches.slice(0, 2);
   const ecosystemContext = selectedEcosystem
     .map(e => {
       const snippet = e.content.slice(0, 150);
@@ -347,21 +348,29 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.5.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.6.0' }));
       return;
     }
 
     if (req.method === 'POST' && req.url === '/compact') {
-      console.log('[Compact] /compact triggered');
+      console.log('[Compact] /compact triggered — running full compaction cycle');
       res.writeHead(202, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'accepted', message: 'Compaction running — watch logs' }));
 
-      compactSmokeTests().then(result => {
-        console.log(`[Compact] Complete — deleted: ${result.deleted}, kept: ${result.kept}`);
-      }).catch((err: unknown) => {
-        const e = err instanceof Error ? err : new Error(String(err));
-        console.error('[Compact] Failed:', e.message);
-      });
+      Promise.resolve()
+        .then(() => compactSmokeTests())
+        .then(smokeResult => {
+          console.log(`[Compact] Smoke done — deleted: ${smokeResult.deleted}, kept: ${smokeResult.kept}`);
+          return compactEcosystemMemory();
+        })
+        .then(ecoResult => {
+          console.log(`[Compact] Ecosystem done — deleted: ${ecoResult.deleted}, kept: ${ecoResult.kept}`);
+          return collectMemoryMetrics();
+        })
+        .catch((err: unknown) => {
+          const e = err instanceof Error ? err : new Error(String(err));
+          console.error('[Compact] Cycle failed:', e.message);
+        });
       return;
     }
 
