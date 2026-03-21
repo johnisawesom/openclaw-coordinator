@@ -10,6 +10,7 @@ const qdrantClient = new QdrantClient({
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'coordinator_logs';
 const SMOKE_COLLECTION = 'coordinator_smoke';
 const ECOSYSTEM_COLLECTION = 'ecosystem_memory';
+const METRICS_COLLECTION = 'coordinator_metrics';
 const EMBEDDER_URL = process.env.EMBEDDER_URL!;
 
 export interface ErrorMemory {
@@ -26,6 +27,22 @@ export interface RecallMatch {
   score: number;
   tier: 1 | 2;
   payload: ErrorMemory;
+}
+
+interface CompactionRule {
+  maxAgeDays: number;
+  confidenceMatch: 'any' | 'zero' | 'unvalidated' | 'validated';
+  action: 'delete' | 'keep';
+}
+
+interface CollectionMetrics {
+  collection: string;
+  total: number;
+  validated: number;
+  unvalidated: number;
+  rejected: number;
+  noConfidence: number;
+  timestamp: string;
 }
 
 export async function getEmbedding(text: string): Promise<number[]> {
@@ -132,11 +149,8 @@ export async function updateConfidence(prUrl: string, confidence: number): Promi
   }
 }
 
-export async function compactSmokeTests(): Promise<{ deleted: number; kept: number }> {
-  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  console.log(`[Compact] Scanning coordinator_smoke for entries older than ${cutoff}`);
-  const toDelete: number[] = [];
-  let kept = 0;
+export async function recentSmokeExists(): Promise<boolean> {
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   let offset: number | undefined = undefined;
 
   while (true) {
@@ -148,11 +162,10 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
     });
 
     for (const point of response.points) {
-      const payload = point.payload as unknown as ErrorMemory;
-      if (payload.timestamp < cutoff) {
-        toDelete.push(point.id as number);
-      } else {
-        kept++;
+      const p = point.payload as unknown as Record<string, unknown>;
+      const timestamp = (p['timestamp'] as string | undefined) ?? '';
+      if (timestamp > oneHourAgo) {
+        return true;
       }
     }
 
@@ -160,32 +173,51 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
     offset = response.next_page_offset as number;
   }
 
-  if (toDelete.length > 0) {
-    await qdrantClient.delete(SMOKE_COLLECTION, { points: toDelete });
-    console.log(`[Compact] Deleted ${toDelete.length} old smoke points`);
-  } else {
-    console.log('[Compact] No old smoke points to delete');
-  }
-
-  console.log(`[Compact] Done — deleted: ${toDelete.length}, kept: ${kept}`);
-  return { deleted: toDelete.length, kept };
+  return false;
 }
 
-export async function compactEcosystemMemory(): Promise<{ deleted: number; kept: number }> {
-  const now = Date.now();
-  const cutoff7d  = new Date(now - 7  * 24 * 60 * 60 * 1000).toISOString();
-  const cutoff30d = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const cutoff90d = new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString();
+function shouldDelete(
+  timestamp: string,
+  confidence: number | undefined,
+  rules: CompactionRule[]
+): boolean {
+  // validated points — keep forever unless explicitly ruled otherwise
+  if (confidence === 1.0) {
+    const validatedRule = rules.find(r => r.confidenceMatch === 'validated');
+    if (!validatedRule || validatedRule.action === 'keep') return false;
+  }
 
-  console.log('[Compact] Scanning ecosystem_memory with tiered rules');
-  console.log(`[Compact] Rules: SmokeTest>7d | confidence=0.0>30d | confidence=0.5>90d | confidence=1.0 keep forever`);
+  for (const rule of rules) {
+    const cutoff = new Date(
+      Date.now() - rule.maxAgeDays * 24 * 60 * 60 * 1000
+    ).toISOString();
 
+    if (timestamp >= cutoff) continue;
+
+    const matches =
+      rule.confidenceMatch === 'any' ||
+      (rule.confidenceMatch === 'zero' && confidence === 0.0) ||
+      (rule.confidenceMatch === 'unvalidated' &&
+        (confidence === undefined || confidence === null ||
+          (confidence > 0.0 && confidence < 1.0))) ||
+      (rule.confidenceMatch === 'validated' && confidence === 1.0);
+
+    if (matches && rule.action === 'delete') return true;
+  }
+
+  return false;
+}
+
+async function compactCollection(
+  collection: string,
+  rules: CompactionRule[]
+): Promise<{ deleted: number; kept: number }> {
   const toDelete: number[] = [];
   let kept = 0;
   let offset: number | undefined = undefined;
 
   while (true) {
-    const response = await qdrantClient.scroll(ECOSYSTEM_COLLECTION, {
+    const response = await qdrantClient.scroll(collection, {
       limit: 100,
       offset,
       with_payload: true,
@@ -195,22 +227,9 @@ export async function compactEcosystemMemory(): Promise<{ deleted: number; kept:
     for (const point of response.points) {
       const p = point.payload as unknown as Record<string, unknown>;
       const timestamp = (p['timestamp'] as string | undefined) ?? '';
-      const confidence = (p['confidence'] as number | undefined) ?? 0.5;
-      const type = (p['type'] as string | undefined) ?? '';
+      const confidence = p['confidence'] as number | undefined;
 
-      let shouldDelete = false;
-
-      if (type === 'SmokeTest' && timestamp < cutoff7d) {
-        shouldDelete = true;
-      } else if (confidence === 0.0 && timestamp < cutoff30d) {
-        shouldDelete = true;
-      } else if (confidence === 1.0) {
-        shouldDelete = false;
-      } else if (confidence < 1.0 && timestamp < cutoff90d) {
-        shouldDelete = true;
-      }
-
-      if (shouldDelete) {
+      if (shouldDelete(timestamp, confidence, rules)) {
         toDelete.push(point.id as number);
       } else {
         kept++;
@@ -222,23 +241,43 @@ export async function compactEcosystemMemory(): Promise<{ deleted: number; kept:
   }
 
   if (toDelete.length > 0) {
-    await qdrantClient.delete(ECOSYSTEM_COLLECTION, { points: toDelete });
-    console.log(`[Compact] ecosystem_memory deleted ${toDelete.length} points`);
+    await qdrantClient.delete(collection, { points: toDelete });
+    console.log(`[Compact] ${collection} — deleted ${toDelete.length} points`);
   } else {
-    console.log('[Compact] ecosystem_memory — nothing to delete');
+    console.log(`[Compact] ${collection} — nothing to delete`);
   }
 
-  console.log(`[Compact] ecosystem_memory done — deleted: ${toDelete.length}, kept: ${kept}`);
   return { deleted: toDelete.length, kept };
 }
 
-interface CollectionMetrics {
-  collection: string;
-  total: number;
-  validated: number;
-  unvalidated: number;
-  rejected: number;
-  noConfidence: number;
+export async function compactSmokeTests(): Promise<{ deleted: number; kept: number }> {
+  console.log('[Compact] Running coordinator_smoke compaction');
+  const result = await compactCollection(SMOKE_COLLECTION, [
+    { maxAgeDays: 7, confidenceMatch: 'any', action: 'delete' },
+  ]);
+  console.log(`[Compact] coordinator_smoke done — deleted: ${result.deleted}, kept: ${result.kept}`);
+  return result;
+}
+
+export async function compactCoordinatorLogs(): Promise<{ deleted: number; kept: number }> {
+  console.log('[Compact] Running coordinator_logs compaction');
+  const result = await compactCollection(COLLECTION_NAME, [
+    { maxAgeDays: 30,  confidenceMatch: 'zero',        action: 'delete' },
+    { maxAgeDays: 90,  confidenceMatch: 'unvalidated',  action: 'delete' },
+  ]);
+  console.log(`[Compact] coordinator_logs done — deleted: ${result.deleted}, kept: ${result.kept}`);
+  return result;
+}
+
+export async function compactEcosystemMemory(): Promise<{ deleted: number; kept: number }> {
+  console.log('[Compact] Running ecosystem_memory compaction');
+  const result = await compactCollection(ECOSYSTEM_COLLECTION, [
+    { maxAgeDays: 7,  confidenceMatch: 'any',         action: 'delete' },
+    { maxAgeDays: 30, confidenceMatch: 'zero',         action: 'delete' },
+    { maxAgeDays: 90, confidenceMatch: 'unvalidated',  action: 'delete' },
+  ]);
+  console.log(`[Compact] ecosystem_memory done — deleted: ${result.deleted}, kept: ${result.kept}`);
+  return result;
 }
 
 async function getCollectionMetrics(collection: string): Promise<CollectionMetrics> {
@@ -277,21 +316,69 @@ async function getCollectionMetrics(collection: string): Promise<CollectionMetri
     offset = response.next_page_offset as number;
   }
 
-  return { collection, total, validated, unvalidated, rejected, noConfidence };
+  return {
+    collection,
+    total,
+    validated,
+    unvalidated,
+    rejected,
+    noConfidence,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 export async function collectMemoryMetrics(): Promise<void> {
   console.log('[Metrics] ========== Memory Quality Report ==========');
 
   const collections = [COLLECTION_NAME, SMOKE_COLLECTION, ECOSYSTEM_COLLECTION];
+  const allMetrics: CollectionMetrics[] = [];
 
   for (const col of collections) {
     try {
       const m = await getCollectionMetrics(col);
-      console.log(`[Metrics] ${m.collection}: total=${m.total} validated(1.0)=${m.validated} unvalidated(0.5)=${m.unvalidated} rejected(0.0)=${m.rejected} no-confidence=${m.noConfidence}`);
+      allMetrics.push(m);
+      console.log(
+        `[Metrics] ${m.collection}: total=${m.total} validated(1.0)=${m.validated} unvalidated(0.5)=${m.unvalidated} rejected(0.0)=${m.rejected} no-confidence=${m.noConfidence}`
+      );
     } catch (err: unknown) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.warn(`[Metrics] Failed to read ${col}: ${e.message}`);
+    }
+  }
+
+  // Persist metrics to coordinator_metrics collection
+  if (allMetrics.length > 0) {
+    try {
+      const summary = allMetrics.reduce(
+        (acc, m) => ({
+          totalPoints: acc.totalPoints + m.total,
+          totalValidated: acc.totalValidated + m.validated,
+          totalUnvalidated: acc.totalUnvalidated + m.unvalidated,
+          totalRejected: acc.totalRejected + m.rejected,
+          totalNoConfidence: acc.totalNoConfidence + m.noConfidence,
+        }),
+        { totalPoints: 0, totalValidated: 0, totalUnvalidated: 0, totalRejected: 0, totalNoConfidence: 0 }
+      );
+
+      const pointId = Date.now();
+      const vector = new Array(384).fill(0) as number[];
+      vector[0] = 0.001;
+
+      await qdrantClient.upsert(METRICS_COLLECTION, {
+        points: [{
+          id: pointId,
+          vector,
+          payload: {
+            timestamp: new Date().toISOString(),
+            collectionBreakdown: allMetrics,
+            ...summary,
+          },
+        }],
+      });
+      console.log(`[Metrics] Report persisted to ${METRICS_COLLECTION} id=${pointId}`);
+    } catch (err: unknown) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[Metrics] Failed to persist report: ${e.message} — logs still captured`);
     }
   }
 
