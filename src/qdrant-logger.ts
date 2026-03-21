@@ -9,6 +9,7 @@ const qdrantClient = new QdrantClient({
 
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'coordinator_logs';
 const SMOKE_COLLECTION = 'coordinator_smoke';
+const ECOSYSTEM_COLLECTION = 'ecosystem_memory';
 const EMBEDDER_URL = process.env.EMBEDDER_URL!;
 
 export interface ErrorMemory {
@@ -168,4 +169,131 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
 
   console.log(`[Compact] Done — deleted: ${toDelete.length}, kept: ${kept}`);
   return { deleted: toDelete.length, kept };
+}
+
+export async function compactEcosystemMemory(): Promise<{ deleted: number; kept: number }> {
+  const now = Date.now();
+  const cutoff7d  = new Date(now - 7  * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff30d = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff90d = new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  console.log('[Compact] Scanning ecosystem_memory with tiered rules');
+  console.log(`[Compact] Rules: SmokeTest>7d | confidence=0.0>30d | confidence=0.5>90d | confidence=1.0 keep forever`);
+
+  const toDelete: number[] = [];
+  let kept = 0;
+  let offset: number | undefined = undefined;
+
+  while (true) {
+    const response = await qdrantClient.scroll(ECOSYSTEM_COLLECTION, {
+      limit: 100,
+      offset,
+      with_payload: true,
+      with_vector: false,
+    });
+
+    for (const point of response.points) {
+      const p = point.payload as unknown as Record<string, unknown>;
+      const timestamp = (p['timestamp'] as string | undefined) ?? '';
+      const confidence = (p['confidence'] as number | undefined) ?? 0.5;
+      const type = (p['type'] as string | undefined) ?? '';
+
+      let shouldDelete = false;
+
+      if (type === 'SmokeTest' && timestamp < cutoff7d) {
+        shouldDelete = true;
+      } else if (confidence === 0.0 && timestamp < cutoff30d) {
+        shouldDelete = true;
+      } else if (confidence === 1.0) {
+        shouldDelete = false;
+      } else if (confidence < 1.0 && timestamp < cutoff90d) {
+        shouldDelete = true;
+      }
+
+      if (shouldDelete) {
+        toDelete.push(point.id as number);
+      } else {
+        kept++;
+      }
+    }
+
+    if (response.next_page_offset == null) break;
+    offset = response.next_page_offset as number;
+  }
+
+  if (toDelete.length > 0) {
+    await qdrantClient.delete(ECOSYSTEM_COLLECTION, { points: toDelete });
+    console.log(`[Compact] ecosystem_memory deleted ${toDelete.length} points`);
+  } else {
+    console.log('[Compact] ecosystem_memory — nothing to delete');
+  }
+
+  console.log(`[Compact] ecosystem_memory done — deleted: ${toDelete.length}, kept: ${kept}`);
+  return { deleted: toDelete.length, kept };
+}
+
+interface CollectionMetrics {
+  collection: string;
+  total: number;
+  validated: number;
+  unvalidated: number;
+  rejected: number;
+  noConfidence: number;
+}
+
+async function getCollectionMetrics(collection: string): Promise<CollectionMetrics> {
+  let total = 0;
+  let validated = 0;
+  let unvalidated = 0;
+  let rejected = 0;
+  let noConfidence = 0;
+  let offset: number | undefined = undefined;
+
+  while (true) {
+    const response = await qdrantClient.scroll(collection, {
+      limit: 100,
+      offset,
+      with_payload: true,
+      with_vector: false,
+    });
+
+    for (const point of response.points) {
+      total++;
+      const p = point.payload as unknown as Record<string, unknown>;
+      const confidence = p['confidence'] as number | undefined;
+
+      if (confidence === undefined || confidence === null) {
+        noConfidence++;
+      } else if (confidence >= 1.0) {
+        validated++;
+      } else if (confidence === 0.0) {
+        rejected++;
+      } else {
+        unvalidated++;
+      }
+    }
+
+    if (response.next_page_offset == null) break;
+    offset = response.next_page_offset as number;
+  }
+
+  return { collection, total, validated, unvalidated, rejected, noConfidence };
+}
+
+export async function collectMemoryMetrics(): Promise<void> {
+  console.log('[Metrics] ========== Memory Quality Report ==========');
+
+  const collections = [COLLECTION_NAME, SMOKE_COLLECTION, ECOSYSTEM_COLLECTION];
+
+  for (const col of collections) {
+    try {
+      const m = await getCollectionMetrics(col);
+      console.log(`[Metrics] ${m.collection}: total=${m.total} validated(1.0)=${m.validated} unvalidated(0.5)=${m.unvalidated} rejected(0.0)=${m.rejected} no-confidence=${m.noConfidence}`);
+    } catch (err: unknown) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[Metrics] Failed to read ${col}: ${e.message}`);
+    }
+  }
+
+  console.log('[Metrics] ========== End Report ==========');
 }
