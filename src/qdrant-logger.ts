@@ -8,6 +8,7 @@ const qdrantClient = new QdrantClient({
 });
 
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'coordinator_logs';
+const SMOKE_COLLECTION = 'coordinator_smoke';
 const EMBEDDER_URL = process.env.EMBEDDER_URL!;
 
 export interface ErrorMemory {
@@ -17,6 +18,7 @@ export interface ErrorMemory {
   details?: Record<string, unknown>;
   fixPrUrl?: string;
   confidence?: number;
+  ecosystemVersion?: string;
 }
 
 export async function getEmbedding(text: string): Promise<number[]> {
@@ -37,11 +39,15 @@ export async function getEmbedding(text: string): Promise<number[]> {
   return result.vector;
 }
 
-export async function upsertPoint(memory: ErrorMemory): Promise<string> {
+export async function upsertPoint(
+  memory: ErrorMemory,
+  targetCollection?: string
+): Promise<string> {
+  const collection = targetCollection ?? COLLECTION_NAME;
   const text = `${memory.type}: ${memory.message} ${JSON.stringify(memory.details || {})}`;
   const vector = await getEmbedding(text);
   const pointId = Date.now();
-  await qdrantClient.upsert(COLLECTION_NAME, {
+  await qdrantClient.upsert(collection, {
     points: [{
       id: pointId,
       vector,
@@ -49,10 +55,11 @@ export async function upsertPoint(memory: ErrorMemory): Promise<string> {
         ...memory,
         timestamp: memory.timestamp || new Date().toISOString(),
         confidence: memory.confidence ?? 0.5,
+        ecosystemVersion: memory.ecosystemVersion ?? process.env.ECOSYSTEM_VERSION ?? '1.0',
       },
     }],
   });
-  console.log(`[SUCCESS] upsertPoint id=${pointId}`);
+  console.log(`[SUCCESS] upsertPoint id=${pointId} collection=${collection}`);
   return pointId.toString();
 }
 
@@ -112,19 +119,13 @@ export async function updateConfidence(prUrl: string, confidence: number): Promi
 
 export async function compactSmokeTests(): Promise<{ deleted: number; kept: number }> {
   const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  console.log(`[Compact] Scanning for SmokeTest entries older than ${cutoff}`);
+  console.log(`[Compact] Scanning coordinator_smoke for entries older than ${cutoff}`);
   const toDelete: number[] = [];
   let kept = 0;
   let offset: number | undefined = undefined;
 
   while (true) {
-    const response = await qdrantClient.scroll(COLLECTION_NAME, {
-      filter: {
-        must: [{
-          key: 'type',
-          match: { value: 'SmokeTest' },
-        }],
-      },
+    const response = await qdrantClient.scroll(SMOKE_COLLECTION, {
       limit: 100,
       offset,
       with_payload: true,
@@ -145,10 +146,10 @@ export async function compactSmokeTests(): Promise<{ deleted: number; kept: numb
   }
 
   if (toDelete.length > 0) {
-    await qdrantClient.delete(COLLECTION_NAME, { points: toDelete });
-    console.log(`[Compact] Deleted ${toDelete.length} old SmokeTest points`);
+    await qdrantClient.delete(SMOKE_COLLECTION, { points: toDelete });
+    console.log(`[Compact] Deleted ${toDelete.length} old smoke points`);
   } else {
-    console.log('[Compact] No old SmokeTest points to delete');
+    console.log('[Compact] No old smoke points to delete');
   }
 
   console.log(`[Compact] Done — deleted: ${toDelete.length}, kept: ${kept}`);
