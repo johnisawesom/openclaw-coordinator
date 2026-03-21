@@ -1,9 +1,20 @@
 import http from 'http';
 import crypto from 'crypto';
-import { upsertPoint, searchSimilarLogs, compactSmokeTests, compactEcosystemMemory, collectMemoryMetrics, updateConfidence, ErrorMemory, RecallMatch } from './qdrant-logger.js';
-import { writeToEcosystem, searchEcosystem } from './ecosystem-memory.js';
+import {
+  upsertPoint,
+  searchSimilarLogs,
+  compactSmokeTests,
+  compactCoordinatorLogs,
+  compactEcosystemMemory,
+  collectMemoryMetrics,
+  updateConfidence,
+  recentSmokeExists,
+  ErrorMemory,
+  RecallMatch,
+} from './qdrant-logger.js';
+import { writeToEcosystem, searchEcosystem, EcosystemEntry } from './ecosystem-memory.js';
+import { createFixPR, createAlertIssue } from './github-client.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { createFixPR } from './github-client.js';
 import dotenv from 'dotenv';
 dotenv.config();
 console.log('[INFO] createFixPR loaded:', typeof createFixPR);
@@ -150,7 +161,7 @@ async function callCoderBot(fix: FixSuggestion): Promise<{ branch: string; commi
 
 function buildRecallContext(
   matches: RecallMatch[],
-  ecosystemMatches: Array<{ bot: string; title: string; content: string }>
+  ecosystemMatches: EcosystemEntry[]
 ): {
   localContext: string;
   ecosystemContext: string;
@@ -164,7 +175,6 @@ function buildRecallContext(
   const selectedTier1 = tier1.slice(0, 3);
   const tier2Slots = Math.max(0, 2 - selectedTier1.length);
   const selectedTier2 = tier2Slots > 0 ? tier2.slice(0, tier2Slots) : [];
-
   const selected = [...selectedTier1, ...selectedTier2];
 
   const localContext = selected
@@ -324,19 +334,55 @@ function verifyWebhookSignature(body: string, signature: string, secret: string)
   }
 }
 
+async function runCompactionCycle(): Promise<void> {
+  try {
+    const smokeResult = await compactSmokeTests();
+    console.log(`[Compact] Smoke done — deleted: ${smokeResult.deleted}, kept: ${smokeResult.kept}`);
+
+    const logsResult = await compactCoordinatorLogs();
+    console.log(`[Compact] Logs done — deleted: ${logsResult.deleted}, kept: ${logsResult.kept}`);
+
+    const ecoResult = await compactEcosystemMemory();
+    console.log(`[Compact] Ecosystem done — deleted: ${ecoResult.deleted}, kept: ${ecoResult.kept}`);
+
+    await collectMemoryMetrics();
+
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    console.error('[Compact] Cycle failed:', e.message);
+
+    try {
+      await createAlertIssue(
+        '[OpenClaw Alert] Compaction cycle failed',
+        `## Compaction Failure\n\n**Time:** ${new Date().toISOString()}\n\n**Error:** ${e.message}\n\n**Action required:** Check Fly logs for openclaw-coordinator and investigate.\n\n\`\`\`\nflyctl logs -a openclaw-coordinator\n\`\`\`\n\n_Generated automatically by OpenClaw Coordinator._`
+      );
+    } catch (issueErr: unknown) {
+      const ie = issueErr instanceof Error ? issueErr : new Error(String(issueErr));
+      console.error('[Compact] Failed to create alert issue:', ie.message);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   console.log('[Coordinator] Boot confirmed - memory-v2 starting');
 
   try {
-    const smokeError: ErrorMemory = {
-      timestamp: new Date().toISOString(),
-      type: 'SmokeTest',
-      message: 'boot smoke test — memory check only',
-      details: { file: 'index.ts', line: 0 },
-    };
+    const recentExists = await recentSmokeExists();
 
-    const id = await upsertPoint(smokeError, SMOKE_COLLECTION);
-    console.log(`[Smoke] Upserted point ID: ${id} — written to coordinator_smoke`);
+    if (recentExists) {
+      console.log('[Smoke] Recent smoke point found (< 1hr) — skipping write to avoid accumulation');
+    } else {
+      const smokeError: ErrorMemory = {
+        timestamp: new Date().toISOString(),
+        type: 'SmokeTest',
+        message: 'boot smoke test — memory check only',
+        details: { file: 'index.ts', line: 0 },
+      };
+
+      const id = await upsertPoint(smokeError, SMOKE_COLLECTION);
+      console.log(`[Smoke] Upserted point ID: ${id} — written to coordinator_smoke`);
+    }
+
     console.log('[Smoke] Memory layer confirmed OK — smoke isolated from recall');
 
   } catch (e: unknown) {
@@ -348,7 +394,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.6.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.7.0' }));
       return;
     }
 
@@ -356,21 +402,7 @@ async function main(): Promise<void> {
       console.log('[Compact] /compact triggered — running full compaction cycle');
       res.writeHead(202, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'accepted', message: 'Compaction running — watch logs' }));
-
-      Promise.resolve()
-        .then(() => compactSmokeTests())
-        .then(smokeResult => {
-          console.log(`[Compact] Smoke done — deleted: ${smokeResult.deleted}, kept: ${smokeResult.kept}`);
-          return compactEcosystemMemory();
-        })
-        .then(ecoResult => {
-          console.log(`[Compact] Ecosystem done — deleted: ${ecoResult.deleted}, kept: ${ecoResult.kept}`);
-          return collectMemoryMetrics();
-        })
-        .catch((err: unknown) => {
-          const e = err instanceof Error ? err : new Error(String(err));
-          console.error('[Compact] Cycle failed:', e.message);
-        });
+      runCompactionCycle();
       return;
     }
 
