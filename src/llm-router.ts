@@ -26,12 +26,12 @@ interface TaskConfig {
 }
 
 const TASK_CONFIG: Record<LLMTask, TaskConfig> = {
-  fix_suggestion: {
-    anthropicModel: 'claude-haiku-3-5-20241022',
+ fix_suggestion: {
+    anthropicModel: 'claude-haiku-3-20240307',
     googleModel: 'gemini-1.5-flash',
   },
   qa_validation: {
-    anthropicModel: 'claude-haiku-3-5-20241022',
+    anthropicModel: 'claude-haiku-3-20240307',
     googleModel: 'gemini-1.5-flash',
   },
   research_synthesis: {
