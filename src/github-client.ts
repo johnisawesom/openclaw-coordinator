@@ -113,11 +113,9 @@ export async function createFixPR(
   let branchName: string;
 
   if (existingBranch) {
-    // Coder Bot already created the branch with real file edits
     branchName = existingBranch;
     console.log(`[INFO] Using existing branch from Coder Bot: ${branchName}`);
   } else {
-    // Fallback — create branch with placeholder commit
     branchName = `fix/auto-${timestamp}`;
     const mainSha = await getMainSha(octokit);
     await createBranch(octokit, branchName, mainSha);
@@ -137,4 +135,30 @@ export async function createFixPR(
 
   console.log(`[SUCCESS] PR created: ${pr.data.html_url}`);
   return pr.data.html_url;
+}
+
+export async function createAlertIssue(
+  title: string,
+  body: string
+): Promise<string> {
+  const token = process.env.GITHUB_PAT ?? "";
+
+  if (!token) {
+    throw new Error("[ERROR] GITHUB_PAT secret is missing — cannot create issue");
+  }
+
+  const octokit = new Octokit({ auth: token });
+
+  const issue = await withRateLimitRetry(() =>
+    octokit.rest.issues.create({
+      owner: OWNER,
+      repo: REPO,
+      title,
+      body,
+      labels: ["alert", "automated"],
+    })
+  );
+
+  console.log(`[Alert] Issue created: ${issue.data.html_url}`);
+  return issue.data.html_url;
 }
