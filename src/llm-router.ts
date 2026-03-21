@@ -26,20 +26,20 @@ interface TaskConfig {
 }
 
 const TASK_CONFIG: Record<LLMTask, TaskConfig> = {
- fix_suggestion: {
-    anthropicModel: 'claude-haiku-3-20240307',
+  fix_suggestion: {
+    anthropicModel: 'claude-haiku-4-5-20251001',
     googleModel: 'gemini-1.5-flash',
   },
   qa_validation: {
-    anthropicModel: 'claude-haiku-3-20240307',
+    anthropicModel: 'claude-haiku-4-5-20251001',
     googleModel: 'gemini-1.5-flash',
   },
   research_synthesis: {
-    anthropicModel: 'claude-sonnet-4-20250514',
+    anthropicModel: 'claude-sonnet-4-6',
     googleModel: 'gemini-1.5-pro',
   },
   code_generation: {
-    anthropicModel: 'claude-sonnet-4-20250514',
+    anthropicModel: 'claude-sonnet-4-6',
     googleModel: 'gemini-1.5-pro',
   },
 };
