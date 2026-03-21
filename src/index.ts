@@ -229,7 +229,7 @@ export async function handleError(error: ErrorMemory): Promise<void> {
 
     console.log(`[Decision] Recall tier1(validated): ${tier1Count} tier2(unvalidated): ${tier2Count} ecosystem: ${ecosystemCount}`);
     console.log(`[Decision] Proceeding to LLM with ${tier1Count + tier2Count} local + ${ecosystemCount} ecosystem context items`);
-    console.log(`[Decision] Model: claude-haiku-3-20240307 (primary) gemini-1.5-flash (fallback)`);
+    console.log(`[Decision] Model: claude-haiku-4-5-20251001 (primary) gemini-1.5-flash (fallback)`);
 
     const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
 
