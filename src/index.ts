@@ -9,6 +9,7 @@ dotenv.config();
 console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 
 const PORT = 8080;
+const SMOKE_COLLECTION = 'coordinator_smoke';
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -294,17 +295,9 @@ async function main(): Promise<void> {
       details: { file: 'index.ts', line: 0 },
     };
 
-    const id = await upsertPoint(smokeError);
-    console.log(`[Smoke] Upserted point ID: ${id}`);
-
-    const matches = await searchSimilarLogs('boot smoke test memory check');
-    console.log(`[Smoke] Recall found ${matches.length} matches`);
-
-    if (matches.length > 0) {
-      console.log(`[Smoke] Best score: ${matches[0].score}`);
-    }
-
-    console.log('[Smoke] Memory layer confirmed OK — no PR created on boot');
+    const id = await upsertPoint(smokeError, SMOKE_COLLECTION);
+    console.log(`[Smoke] Upserted point ID: ${id} — written to coordinator_smoke`);
+    console.log('[Smoke] Memory layer confirmed OK — smoke isolated from recall');
 
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
@@ -315,7 +308,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.3.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.4.0' }));
       return;
     }
 
