@@ -118,12 +118,12 @@ export async function getEmbedding(text: string): Promise<number[]> {
   if (!res.ok) {
     throw new Error(`[qdrant-logger] Embedder returned ${res.status}`);
   }
-  const data = await res.json() as { embedding: number[] };
-  if (!Array.isArray(data.embedding) || data.embedding.length !== DIMS) {
-    throw new Error(`[qdrant-logger] Embedding dimension mismatch: got ${data.embedding?.length}`);
+  const data = await res.json() as { vector: number[] };
+  if (!Array.isArray(data.vector) || data.vector.length !== DIMS) {
+    throw new Error(`[qdrant-logger] Embedding dimension mismatch: got ${data.vector?.length}`);
   }
   console.log('[qdrant-logger] getEmbedding: received valid 384-dim embedding');
-  return data.embedding;
+  return data.vector;
 }
 
 export async function ensureCollection(name: string, dims: number = DIMS): Promise<void> {
