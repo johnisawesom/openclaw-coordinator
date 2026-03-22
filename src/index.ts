@@ -59,7 +59,7 @@ function parseFixSuggestion(raw: string): FixSuggestion {
     typeof (parsed as Record<string, unknown>).file !== 'string' ||
     typeof (parsed as Record<string, unknown>).line !== 'number' ||
     typeof (parsed as Record<string, unknown>).action !== 'string' ||
-    typeof (parsed as Record<string, unknown>).newContent !== 'string' ||
+  const candidate = parsed as Record<string, unknown>;
     typeof (parsed as Record<string, unknown>).description !== 'string'
   ) {
     throw new Error('Missing or invalid fields in LLM JSON response');
