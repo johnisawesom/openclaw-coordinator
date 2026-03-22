@@ -21,6 +21,7 @@ console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
+const ECOSYSTEM_VERSION = process.env.ECOSYSTEM_VERSION || '1.0';
 
 interface FixSuggestion {
   file: string;
@@ -165,8 +166,11 @@ function buildRecallContext(
   tier2Count: number;
   ecosystemCount: number;
 } {
-  const tier1 = matches.filter(m => m.tier === 1);
-  const tier2 = matches.filter(m => m.tier === 2 && (m.payload.confidence ?? 0.5) > 0.3);
+  // FIX: tier is now 'primary' | 'ecosystem' string, and data is in .memory not .payload
+  const tier1 = matches.filter(m => m.tier === 'primary');
+  const tier2 = matches.filter(
+    m => m.tier === 'ecosystem' && (m.memory.confidence ?? 0.5) > 0.3
+  );
 
   const selectedTier1 = tier1.slice(0, 3);
   const tier2Slots = Math.max(0, 2 - selectedTier1.length);
@@ -175,9 +179,9 @@ function buildRecallContext(
 
   const localContext = selected
     .map(m => {
-      const payload = JSON.stringify(m.payload).slice(0, 200);
-      const tierLabel = m.tier === 1 ? 'validated' : 'unvalidated';
-      return `Past fix [${tierLabel}] (score ${m.score.toFixed(3)}, confidence ${(m.payload.confidence ?? 0.5).toFixed(2)}): ${payload}`;
+      const payload = JSON.stringify(m.memory).slice(0, 200);
+      const tierLabel = m.tier === 'primary' ? 'validated' : 'unvalidated';
+      return `Past fix [${tierLabel}] (score ${m.score.toFixed(3)}, confidence ${(m.memory.confidence ?? 0.5).toFixed(2)}): ${payload}`;
     })
     .join('\n\n');
 
@@ -275,8 +279,10 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       const e = llmErr instanceof Error ? llmErr : new Error(String(llmErr));
       if (e.message.startsWith('LLM_BOTH_FAILED')) {
         console.error(`[Decision] LLM_BOTH_FAILED — both providers exhausted, logging to memory`);
+        // FIX: ecosystemVersion now required in ErrorMemory
         await upsertPoint({
           timestamp: new Date().toISOString(),
+          ecosystemVersion: ECOSYSTEM_VERSION,
           type: 'LLMFailure',
           message: 'Both LLM providers failed during fix_suggestion',
           details: { originalError: error.message, originalType: error.type },
@@ -356,16 +362,18 @@ function verifyWebhookSignature(body: string, signature: string, secret: string)
 
 async function runCompactionCycle(): Promise<void> {
   try {
-    const smokeResult = await compactSmokeTests();
-    console.log(`[Compact] Smoke done — deleted: ${smokeResult.deleted}, kept: ${smokeResult.kept}`);
+    // FIX: compaction functions return void — removed .deleted/.kept access
+    await compactSmokeTests();
+    console.log(`[Compact] Smoke done`);
 
-    const logsResult = await compactCoordinatorLogs();
-    console.log(`[Compact] Logs done — deleted: ${logsResult.deleted}, kept: ${logsResult.kept}`);
+    await compactCoordinatorLogs();
+    console.log(`[Compact] Logs done`);
 
-    const ecoResult = await compactEcosystemMemory();
-    console.log(`[Compact] Ecosystem done — deleted: ${ecoResult.deleted}, kept: ${ecoResult.kept}`);
+    await compactEcosystemMemory();
+    console.log(`[Compact] Ecosystem done`);
 
     await collectMemoryMetrics();
+    console.log(`[Compact] Metrics collected`);
 
   } catch (err: unknown) {
     const e = err instanceof Error ? err : new Error(String(err));
@@ -392,8 +400,10 @@ async function main(): Promise<void> {
     if (recentExists) {
       console.log('[Smoke] Recent smoke point found (< 1hr) — skipping write to avoid accumulation');
     } else {
+      // FIX: ecosystemVersion now required in ErrorMemory
       const smokeError: ErrorMemory = {
         timestamp: new Date().toISOString(),
+        ecosystemVersion: ECOSYSTEM_VERSION,
         type: 'SmokeTest',
         message: 'boot smoke test — memory check only',
         details: { file: 'index.ts', line: 0 },
@@ -484,13 +494,37 @@ async function main(): Promise<void> {
           return;
         }
 
-        const confidence = merged === true ? 1.0 : 0.0;
-        console.log(`[Webhook] PR closed — merged=${merged} confidence=${confidence} url=${prUrl}`);
+        // Read PR labels for graduated confidence
+        const labels = pr.labels as Array<{ name: string }> | undefined;
+        const labelNames = (labels || []).map(l => l.name);
+
+        let confidence: number;
+        let outcomeLabel: ErrorMemory['outcomeLabel'] | undefined;
+
+        if (!merged) {
+          confidence = 0.0;
+        } else if (labelNames.includes('suppressed-error')) {
+          confidence = 0.0;
+          outcomeLabel = 'suppressed-error';
+        } else if (labelNames.includes('wrong-diagnosis')) {
+          confidence = 0.4;
+          outcomeLabel = 'wrong-diagnosis';
+        } else if (labelNames.includes('correct-but-risky')) {
+          confidence = 0.8;
+          outcomeLabel = 'correct-but-risky';
+        } else if (labelNames.includes('good-fix')) {
+          confidence = 1.0;
+          outcomeLabel = 'good-fix';
+        } else {
+          confidence = 0.7;
+        }
+
+        console.log(`[Webhook] PR closed — merged=${merged} labels=${labelNames.join(',')} confidence=${confidence} url=${prUrl}`);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'accepted' }));
 
-        updateConfidence(prUrl, confidence).catch((err: unknown) => {
+        updateConfidence(prUrl, confidence, outcomeLabel).catch((err: unknown) => {
           const e = err instanceof Error ? err : new Error(String(err));
           console.error('[Webhook] updateConfidence failed:', e.message);
         });
