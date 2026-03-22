@@ -13,7 +13,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withRateLimitRetry<T>(
+export async function withRateLimitRetry<T>(
   fn: () => Promise<T>,
   maxRetries: number = 3
 ): Promise<T> {
@@ -160,5 +160,133 @@ export async function createAlertIssue(
   );
 
   console.log(`[Alert] Issue created: ${issue.data.html_url}`);
+  return issue.data.html_url;
+}
+
+export async function fetchFileFromGitHub(
+  file: string,
+  targetRepo: string = REPO
+): Promise<string> {
+  console.log(`[github-client] fetchFileFromGitHub: fetching ${file} from ${OWNER}/${targetRepo}`);
+
+  const token = process.env.GITHUB_PAT ?? "";
+  if (!token) {
+    throw new Error("[ERROR] GITHUB_PAT secret is missing — cannot fetch file");
+  }
+
+  const octokit = new Octokit({ auth: token });
+
+  const response = await withRateLimitRetry(() =>
+    octokit.rest.repos.getContent({
+      owner: OWNER,
+      repo: targetRepo,
+      path: file,
+    })
+  );
+
+  const data = response.data;
+
+  if (Array.isArray(data)) {
+    throw new Error(`[github-client] fetchFileFromGitHub: ${file} is a directory, not a file`);
+  }
+
+  if (!("content" in data) || typeof data.content !== "string") {
+    throw new Error(`[github-client] fetchFileFromGitHub: no content field in response for ${file}`);
+  }
+
+  const content = Buffer.from(data.content, "base64").toString("utf8");
+  console.log(`[github-client] fetchFileFromGitHub: fetched ${content.length} chars from ${file}`);
+  return content;
+}
+
+export async function fetchRecentCommits(
+  file: string,
+  limit: number = 5,
+  targetRepo: string = REPO
+): Promise<Array<{ sha: string; message: string; author: string; date: string }>> {
+  console.log(`[github-client] fetchRecentCommits: fetching last ${limit} commits for ${file}`);
+
+  const token = process.env.GITHUB_PAT ?? "";
+  if (!token) {
+    throw new Error("[ERROR] GITHUB_PAT secret is missing — cannot fetch commits");
+  }
+
+  const octokit = new Octokit({ auth: token });
+
+  const response = await withRateLimitRetry(() =>
+    octokit.rest.repos.listCommits({
+      owner: OWNER,
+      repo: targetRepo,
+      path: file,
+      per_page: limit,
+    })
+  );
+
+  const commits = response.data.map((c) => ({
+    sha: c.sha.slice(0, 7),
+    message: c.commit.message.split("\n")[0],
+    author: c.commit.author?.name ?? "unknown",
+    date: c.commit.author?.date ?? new Date().toISOString(),
+  }));
+
+  console.log(`[github-client] fetchRecentCommits: found ${commits.length} commits for ${file}`);
+  return commits;
+}
+
+export async function openDiagnosisIssue(
+  errorType: string,
+  errorMessage: string,
+  diagnosisConfidence: number,
+  rootCauseSummary: string
+): Promise<string> {
+  console.log(`[github-client] openDiagnosisIssue: confidence=${diagnosisConfidence} type=${errorType}`);
+
+  const token = process.env.GITHUB_PAT ?? "";
+  if (!token) {
+    throw new Error("[ERROR] GITHUB_PAT secret is missing — cannot create issue");
+  }
+
+  const octokit = new Octokit({ auth: token });
+  const timestamp = new Date().toISOString();
+
+  const body = `## NEEDS_DIAGNOSIS
+
+**Time:** ${timestamp}
+**Error type:** ${errorType}
+**Error message:** ${errorMessage}
+
+## Diagnosis Attempt
+
+**Confidence:** ${(diagnosisConfidence * 100).toFixed(0)}% (threshold: 70%)
+
+**Root cause summary:**
+${rootCauseSummary}
+
+## Why No Auto-Fix Was Attempted
+
+Diagnosis confidence is below the 0.7 threshold required to generate a fix.
+Generating a fix with low confidence risks making the problem worse.
+
+## Action Required
+
+1. Review the error and logs in Fly.io
+2. Identify the true root cause
+3. Apply fix manually or close this issue with a comment explaining the cause
+4. The system will learn from future similar errors
+
+---
+_Generated automatically by OpenClaw Coordinator. Principle 6: Diagnosis Before Treatment._`;
+
+  const issue = await withRateLimitRetry(() =>
+    octokit.rest.issues.create({
+      owner: OWNER,
+      repo: REPO,
+      title: `[NEEDS_DIAGNOSIS] ${errorType} — confidence ${(diagnosisConfidence * 100).toFixed(0)}%`,
+      body,
+      labels: ["needs-diagnosis", "automated"],
+    })
+  );
+
+  console.log(`[github-client] openDiagnosisIssue: created ${issue.data.html_url}`);
   return issue.data.html_url;
 }
