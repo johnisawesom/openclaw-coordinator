@@ -9,12 +9,24 @@ import {
   collectMemoryMetrics,
   updateConfidence,
   recentSmokeExists,
+  ensureCollection,
+  updateDiagnosis,
+  findRecentFixForFile,
   ErrorMemory,
   RecallMatch,
+  DiagnosisRecord,
 } from './qdrant-logger.js';
 import { writeToEcosystem, searchEcosystem, EcosystemEntry } from './ecosystem-memory.js';
-import { createFixPR, createAlertIssue } from './github-client.js';
+import {
+  createFixPR,
+  createAlertIssue,
+  fetchFileFromGitHub,
+  fetchRecentCommits,
+  openDiagnosisIssue,
+} from './github-client.js';
 import { callLLM } from './llm-router.js';
+import { setState, getState, ensureStateCollection } from './ecosystem-state.js';
+import { COORDINATOR_CONSTITUTION } from './coordinator-constitution.js';
 import dotenv from 'dotenv';
 dotenv.config();
 console.log('[INFO] createFixPR loaded:', typeof createFixPR);
@@ -22,6 +34,7 @@ console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
 const ECOSYSTEM_VERSION = process.env.ECOSYSTEM_VERSION || '1.0';
+const BOT_VERSION = '1.9.0';
 
 interface FixSuggestion {
   file: string;
@@ -166,7 +179,6 @@ function buildRecallContext(
   tier2Count: number;
   ecosystemCount: number;
 } {
-  // FIX: tier is now 'primary' | 'ecosystem' string, and data is in .memory not .payload
   const tier1 = matches.filter(m => m.tier === 'primary');
   const tier2 = matches.filter(
     m => m.tier === 'ecosystem' && (m.memory.confidence ?? 0.5) > 0.3
@@ -202,44 +214,281 @@ function buildRecallContext(
   };
 }
 
+// ── Phase 1: Enrich ───────────────────────────────────────────────────────────
+
+async function enrichError(error: ErrorMemory): Promise<ErrorMemory> {
+  console.log(`[Enrich] Phase 1: enriching error type=${error.type}`);
+
+  const enriched: ErrorMemory = { ...error };
+
+  // Fetch file content snapshot if error references a file
+  if (error.details && typeof error.details['file'] === 'string') {
+    const file = error.details['file'] as string;
+    try {
+      enriched.fileContent = await fetchFileFromGitHub(file);
+      console.log(`[Enrich] Fetched file content: ${file} (${enriched.fileContent.length} chars)`);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.warn(`[Enrich] Could not fetch file ${file}: ${err.message}`);
+    }
+
+    // Fetch recent commits for that file
+    try {
+      enriched.recentCommits = await fetchRecentCommits(file, 5);
+      console.log(`[Enrich] Fetched ${enriched.recentCommits.length} recent commits for ${file}`);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.warn(`[Enrich] Could not fetch commits for ${file}: ${err.message}`);
+    }
+
+    // Check for recent fix attempts on same file
+    try {
+      const recentFix = await findRecentFixForFile(file, 7);
+      if (recentFix) {
+        console.log(`[Enrich] Found recent fix for ${file} — possible recurrence`);
+        enriched.relatedErrorIds = enriched.relatedErrorIds || [];
+        if (recentFix.prUrl) {
+          enriched.relatedErrorIds.push(recentFix.prUrl);
+        }
+        enriched.recurredAfterFix = true;
+      }
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.warn(`[Enrich] Could not check recent fixes: ${err.message}`);
+    }
+  }
+
+  console.log(`[Enrich] Phase 1 complete — fileContent=${!!enriched.fileContent} commits=${enriched.recentCommits?.length ?? 0} recurred=${enriched.recurredAfterFix ?? false}`);
+  return enriched;
+}
+
+// ── Phase 2: Diagnose ─────────────────────────────────────────────────────────
+
+async function diagnoseError(
+  enriched: ErrorMemory,
+  pointId: string
+): Promise<DiagnosisRecord | null> {
+  console.log(`[Diagnose] Phase 2: diagnosing error type=${enriched.type}`);
+
+  const fileSection = enriched.fileContent
+    ? `\nFile content snapshot:\n\`\`\`typescript\n${enriched.fileContent.slice(0, 2000)}\n\`\`\``
+    : '\nNo file content available.';
+
+  const commitsSection = enriched.recentCommits && enriched.recentCommits.length > 0
+    ? `\nRecent commits:\n${enriched.recentCommits.map(c => `- ${c.sha} (${c.author}, ${c.date}): ${c.message}`).join('\n')}`
+    : '\nNo recent commits available.';
+
+  const recurrenceNote = enriched.recurredAfterFix
+    ? '\nNOTE: This error has recurred after a recent fix attempt. The previous fix may have been incomplete.'
+    : '';
+
+  const diagnosisPrompt = `${COORDINATOR_CONSTITUTION}
+
+You are diagnosing an error in the OpenClaw ecosystem.
+
+ERROR:
+Type: ${enriched.type}
+Message: ${enriched.message}
+Details: ${JSON.stringify(enriched.details || {})}
+${fileSection}
+${commitsSection}
+${recurrenceNote}
+
+Respond with ONLY a JSON object in this exact format, no other text:
+{
+  "rootCause": "<one sentence describing the true root cause>",
+  "confidence": <number between 0.0 and 1.0>,
+  "affectedLines": [<line numbers as integers>],
+  "riskLevel": "low" | "medium" | "high",
+  "diagnosedBy": "coordinator-llm"
+}
+
+Confidence guide:
+- 0.9+ : You can see the exact broken line in the file content
+- 0.7-0.9 : You understand the cause but cannot pinpoint the exact line
+- 0.5-0.7 : You have a hypothesis but are not certain
+- below 0.5 : You do not have enough information to diagnose`;
+
+  let diagnosisText: string;
+  try {
+    const diagnosisResponse = await callLLM({
+      task: 'fix_suggestion',
+      prompt: diagnosisPrompt,
+      systemPrompt: 'You are a senior TypeScript engineer diagnosing errors. Return ONLY valid JSON. No explanation outside the JSON.',
+      maxTokens: 300,
+    });
+    diagnosisText = diagnosisResponse.text;
+    console.log(`[Diagnose] LLM responded via ${diagnosisResponse.provider} using ${diagnosisResponse.model}`);
+  } catch (llmErr: unknown) {
+    const e = llmErr instanceof Error ? llmErr : new Error(String(llmErr));
+    console.error(`[Diagnose] LLM call failed: ${e.message}`);
+    return null;
+  }
+
+  console.log('[Diagnose] Raw diagnosis response:', diagnosisText);
+
+  let diagnosis: DiagnosisRecord;
+  try {
+    const cleaned = diagnosisText
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+
+    diagnosis = {
+      rootCause: String(parsed['rootCause'] ?? 'unknown'),
+      confidence: Number(parsed['confidence'] ?? 0),
+      affectedLines: Array.isArray(parsed['affectedLines'])
+        ? (parsed['affectedLines'] as unknown[]).map(Number)
+        : [],
+      riskLevel: (parsed['riskLevel'] === 'low' || parsed['riskLevel'] === 'medium' || parsed['riskLevel'] === 'high')
+        ? parsed['riskLevel']
+        : 'medium',
+      diagnosedBy: String(parsed['diagnosedBy'] ?? 'coordinator-llm'),
+      diagnosedAt: new Date().toISOString(),
+    };
+
+    console.log(`[Diagnose] Parsed — confidence=${diagnosis.confidence} risk=${diagnosis.riskLevel}`);
+    console.log(`[Diagnose] Root cause: ${diagnosis.rootCause}`);
+
+  } catch (parseErr: unknown) {
+    const e = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
+    console.error(`[Diagnose] Failed to parse diagnosis JSON: ${e.message}`);
+    return null;
+  }
+
+  // Store diagnosis back to Qdrant
+  try {
+    await updateDiagnosis(pointId, diagnosis);
+    console.log(`[Diagnose] Diagnosis stored to point ${pointId}`);
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.warn(`[Diagnose] Could not store diagnosis: ${err.message}`);
+  }
+
+  return diagnosis;
+}
+
+// ── Main error handler ────────────────────────────────────────────────────────
+
 export async function handleError(error: ErrorMemory): Promise<void> {
   console.log(`[Decision] ========== handleError start ==========`);
   console.log(`[Decision] Error type: ${error.type}`);
   console.log(`[Decision] Error message: ${error.message}`);
 
+  // Phase 0: Check if already processing
   try {
-    const id = await upsertPoint(error);
-    console.log(`[Decision] Upserted to coordinator_logs — point ID: ${id}`);
+    const processingState = await getState('coordinator_processing');
+    if (processingState && processingState.value === 'true') {
+      console.warn('[Decision] Phase 0: coordinator_processing=true — skipping to avoid concurrent fixes');
+      return;
+    }
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.warn(`[Decision] Phase 0: could not read state — proceeding: ${err.message}`);
+  }
+
+  try {
+    await setState('coordinator_processing', 'true');
+    console.log('[Decision] Phase 0: coordinator_processing set to true');
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.warn(`[Decision] Phase 0: could not set state — proceeding: ${err.message}`);
+  }
+
+  try {
+    // Ensure error has ecosystemVersion
+    const enrichedBase: ErrorMemory = {
+      ...error,
+      ecosystemVersion: error.ecosystemVersion || ECOSYSTEM_VERSION,
+      confidence: 0.5,
+    };
+
+    // Store initial error memory
+    const pointId = await upsertPoint(enrichedBase);
+    console.log(`[Decision] Upserted to coordinator_logs — point ID: ${pointId}`);
 
     writeToEcosystem({
       bot: 'coordinator',
-      type: error.type,
-      title: `${error.type}: ${error.message}`,
-      content: JSON.stringify(error.details || {}),
-      timestamp: error.timestamp || new Date().toISOString(),
-      metadata: { pointId: id },
+      type: enrichedBase.type,
+      title: `${enrichedBase.type}: ${enrichedBase.message}`,
+      content: JSON.stringify(enrichedBase.details || {}),
+      timestamp: enrichedBase.timestamp || new Date().toISOString(),
+      metadata: { pointId },
     }).catch((err: unknown) => {
       const e = err instanceof Error ? err : new Error(String(err));
       console.warn(`[Ecosystem] Write failed — not blocking handleError: ${e.message}`);
     });
 
+    // Phase 1: Enrich
+    const enriched = await enrichError(enrichedBase);
+
+    // Phase 2: Diagnose
+    const diagnosis = await diagnoseError(enriched, pointId);
+
+    if (!diagnosis) {
+      console.warn('[Decision] Phase 2: diagnosis returned null — cannot proceed to fix');
+      await openDiagnosisIssue(
+        enriched.type,
+        enriched.message,
+        0,
+        'Diagnosis LLM call failed or returned unparseable response'
+      ).catch((e: unknown) => {
+        const err = e instanceof Error ? e : new Error(String(e));
+        console.warn(`[Decision] Could not open diagnosis issue: ${err.message}`);
+      });
+      return;
+    }
+
+    console.log(`[Decision] Phase 2 complete — confidence=${diagnosis.confidence} threshold=0.7`);
+
+    if (diagnosis.confidence < 0.7) {
+      console.warn(`[Decision] Phase 2: confidence ${diagnosis.confidence} below 0.7 — opening NEEDS_DIAGNOSIS issue`);
+      await openDiagnosisIssue(
+        enriched.type,
+        enriched.message,
+        diagnosis.confidence,
+        diagnosis.rootCause
+      ).catch((e: unknown) => {
+        const err = e instanceof Error ? e : new Error(String(e));
+        console.warn(`[Decision] Could not open diagnosis issue: ${err.message}`);
+      });
+      return;
+    }
+
+    console.log('[Decision] Phase 2: confidence sufficient — proceeding to fix generation');
+
+    // Phase 3: Generate fix
     const [matches, ecosystemMatches] = await Promise.all([
-      searchSimilarLogs(error.message),
-      searchEcosystem(error.message),
+      searchSimilarLogs(enriched.message),
+      searchEcosystem(enriched.message),
     ]);
 
     const { localContext, ecosystemContext, tier1Count, tier2Count, ecosystemCount } =
       buildRecallContext(matches, ecosystemMatches);
 
     console.log(`[Decision] Recall tier1(validated): ${tier1Count} tier2(unvalidated): ${tier2Count} ecosystem: ${ecosystemCount}`);
-    console.log(`[Decision] Proceeding to LLM with ${tier1Count + tier2Count} local + ${ecosystemCount} ecosystem context items`);
-    console.log(`[Decision] Model: claude-haiku-4-5-20251001 (primary) gemini-1.5-flash (fallback)`);
 
-    const prompt = `You are a senior TypeScript engineer fixing OpenClaw Coordinator.
+    const fileContextSection = enriched.fileContent
+      ? `\nCurrent file content:\n\`\`\`typescript\n${enriched.fileContent.slice(0, 3000)}\n\`\`\``
+      : '';
+
+    const prompt = `${COORDINATOR_CONSTITUTION}
+
+You are a senior TypeScript engineer fixing OpenClaw Coordinator.
+
+DIAGNOSIS:
+Root cause: ${diagnosis.rootCause}
+Confidence: ${diagnosis.confidence}
+Risk level: ${diagnosis.riskLevel}
+Affected lines: ${diagnosis.affectedLines.join(', ') || 'unknown'}
 
 Current error:
-${error.type}: ${error.message}
-Details: ${JSON.stringify(error.details)}
+${enriched.type}: ${enriched.message}
+Details: ${JSON.stringify(enriched.details)}
+${fileContextSection}
 
 Past similar fixes:
 ${localContext || '(none found)'}
@@ -279,13 +528,12 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       const e = llmErr instanceof Error ? llmErr : new Error(String(llmErr));
       if (e.message.startsWith('LLM_BOTH_FAILED')) {
         console.error(`[Decision] LLM_BOTH_FAILED — both providers exhausted, logging to memory`);
-        // FIX: ecosystemVersion now required in ErrorMemory
         await upsertPoint({
           timestamp: new Date().toISOString(),
           ecosystemVersion: ECOSYSTEM_VERSION,
           type: 'LLMFailure',
           message: 'Both LLM providers failed during fix_suggestion',
-          details: { originalError: error.message, originalType: error.type },
+          details: { originalError: enriched.message, originalType: enriched.type },
         });
       } else {
         console.error(`[Decision] LLM call failed: ${e.message}`);
@@ -308,8 +556,9 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       return;
     }
 
+    // Phase 4: QA + Coder
     const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
-    console.log(`[Decision] Sending to QA Bot for review`);
+    console.log(`[Decision] Phase 4: sending to QA Bot`);
     const qaResult = await callQABot(fixJson, tempPrUrl);
     console.log(`[Decision] QA result: ${qaResult.status} — ${qaResult.reason}`);
 
@@ -331,17 +580,52 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       return;
     }
 
-    const prUrl = await createFixPR(
-      `${fixJson.description}\n\n\`\`\`\nFile: ${fixJson.file}\nLine: ${fixJson.line}\nAction: ${fixJson.action}\nNew content: ${fixJson.newContent}\n\`\`\``,
-      error.type,
-      branch
-    );
+    const prBody = `## Auto-generated fix
+
+**Error type:** ${enriched.type}
+
+## Diagnosis
+**Root cause:** ${diagnosis.rootCause}
+**Confidence:** ${(diagnosis.confidence * 100).toFixed(0)}%
+**Risk level:** ${diagnosis.riskLevel}
+
+## Fix Applied
+\`\`\`
+File: ${fixJson.file}
+Line: ${fixJson.line}
+Action: ${fixJson.action}
+New content: ${fixJson.newContent}
+\`\`\`
+
+**Description:** ${fixJson.description}
+
+## Context Used
+- Local recall: ${tier1Count} validated + ${tier2Count} unvalidated matches
+- Ecosystem recall: ${ecosystemCount} cross-bot insights
+- File content snapshot: ${enriched.fileContent ? 'yes' : 'no'}
+- Recent commits fetched: ${enriched.recentCommits?.length ?? 0}
+- Recurred after previous fix: ${enriched.recurredAfterFix ?? false}
+
+---
+_Generated by OpenClaw Coordinator v${BOT_VERSION}. Apply label before closing._`;
+
+    const prUrl = await createFixPR(prBody, enriched.type, branch);
     console.log(`[Decision] PR opened: ${prUrl}`);
+
+    // Phase 5: Update state
+    await setState('last_fix_completed', new Date().toISOString()).catch(() => {});
+    await setState('last_fix_pr_url', prUrl).catch(() => {});
+    console.log('[Decision] Phase 5: ecosystem state updated');
+
     console.log(`[Decision] ========== handleError complete ==========`);
 
   } catch (err: unknown) {
     const e = err instanceof Error ? err : new Error(String(err));
     console.error('[handleError] Failed:', e.message);
+  } finally {
+    // Always release the processing lock
+    await setState('coordinator_processing', 'false').catch(() => {});
+    console.log('[Decision] Finally: coordinator_processing released');
   }
 }
 
@@ -362,7 +646,6 @@ function verifyWebhookSignature(body: string, signature: string, secret: string)
 
 async function runCompactionCycle(): Promise<void> {
   try {
-    // FIX: compaction functions return void — removed .deleted/.kept access
     await compactSmokeTests();
     console.log(`[Compact] Smoke done`);
 
@@ -392,15 +675,32 @@ async function runCompactionCycle(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log('[Coordinator] Boot confirmed - memory-v2 starting');
+  console.log(`[Coordinator] Boot confirmed - v${BOT_VERSION} starting`);
 
+  // Ensure all required collections exist
+  try {
+    await ensureCollection('coordinator_logs');
+    await ensureCollection('coordinator_smoke');
+    await ensureCollection('coordinator_metrics');
+    await ensureCollection('ecosystem_memory');
+    await ensureCollection('researcher_logs');
+    await ensureCollection('ecosystem_reputation');
+    await ensureCollection('qa_logs');
+    await ensureCollection('coder_logs');
+    await ensureStateCollection();
+    console.log('[Boot] All collections confirmed');
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.error('[Boot] Collection setup failed:', err.message);
+  }
+
+  // Smoke test
   try {
     const recentExists = await recentSmokeExists();
 
     if (recentExists) {
       console.log('[Smoke] Recent smoke point found (< 1hr) — skipping write to avoid accumulation');
     } else {
-      // FIX: ecosystemVersion now required in ErrorMemory
       const smokeError: ErrorMemory = {
         timestamp: new Date().toISOString(),
         ecosystemVersion: ECOSYSTEM_VERSION,
@@ -424,7 +724,7 @@ async function main(): Promise<void> {
 
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: '1.8.0' }));
+      res.end(JSON.stringify({ status: 'ok', bot: 'openclaw-coordinator', version: BOT_VERSION }));
       return;
     }
 
@@ -494,7 +794,6 @@ async function main(): Promise<void> {
           return;
         }
 
-        // Read PR labels for graduated confidence
         const labels = pr.labels as Array<{ name: string }> | undefined;
         const labelNames = (labels || []).map(l => l.name);
 
