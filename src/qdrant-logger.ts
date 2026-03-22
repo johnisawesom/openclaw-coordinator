@@ -126,6 +126,24 @@ export async function getEmbedding(text: string): Promise<number[]> {
   return data.vector;
 }
 
+async function ensurePayloadIndex(
+  collection: string,
+  field: string,
+  fieldType: string = 'keyword'
+): Promise<void> {
+  try {
+    await qdrantRequest('PUT', `/collections/${collection}/index`, {
+      field_name: field,
+      field_schema: fieldType,
+    });
+    console.log(`[qdrant-logger] ensurePayloadIndex: index on ${collection}.${field} confirmed`);
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    // Index may already exist — not an error
+    console.log(`[qdrant-logger] ensurePayloadIndex: ${collection}.${field} — ${err.message.slice(0, 80)}`);
+  }
+}
+
 export async function ensureCollection(name: string, dims: number = DIMS): Promise<void> {
   console.log(`[qdrant-logger] ensureCollection: checking ${name}`);
   try {
@@ -137,6 +155,22 @@ export async function ensureCollection(name: string, dims: number = DIMS): Promi
       vectors: { size: dims, distance: 'Cosine' },
     });
     console.log(`[qdrant-logger] ensureCollection: ${name} created`);
+  }
+
+  // Ensure payload indexes for filterable fields
+  if (name === 'coordinator_logs') {
+    await ensurePayloadIndex(name, 'prUrl');
+    await ensurePayloadIndex(name, 'fixAttempt.file');
+    await ensurePayloadIndex(name, 'timestamp');
+  }
+  if (name === 'coordinator_smoke') {
+    await ensurePayloadIndex(name, 'timestamp');
+  }
+  if (name === 'ecosystem_memory') {
+    await ensurePayloadIndex(name, 'timestamp');
+  }
+  if (name === 'researcher_logs') {
+    await ensurePayloadIndex(name, 'timestamp');
   }
 }
 
