@@ -42,16 +42,15 @@ async function qdrantRequest(
   return res.json();
 }
 
-function stableId(key: string): string {
-  // Each state key gets a deterministic numeric ID so upsert overwrites in place
-  // Simple hash: sum char codes, mod large prime, keep positive
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
-  }
-  // Qdrant unsigned int ID — keep it in safe range
-  return String((hash % 999999) + 1);
-}
+// Each StateKey maps to a fixed UUID so upsert always overwrites the same point
+const STATE_KEY_IDS: Record<StateKey, string> = {
+  'coordinator_processing': '00000001-0000-0000-0000-000000000001',
+  'last_fix_completed':     '00000001-0000-0000-0000-000000000002',
+  'last_fix_pr_url':        '00000001-0000-0000-0000-000000000003',
+  'last_health_check':      '00000001-0000-0000-0000-000000000004',
+  'embedder_status':        '00000001-0000-0000-0000-000000000005',
+  'active_fix_file':        '00000001-0000-0000-0000-000000000006',
+};
 
 export async function ensureStateCollection(): Promise<void> {
   console.log('[ecosystem-state] ensureStateCollection: checking ecosystem_state');
@@ -60,8 +59,6 @@ export async function ensureStateCollection(): Promise<void> {
     console.log('[ecosystem-state] ensureStateCollection: already exists');
   } catch {
     console.log('[ecosystem-state] ensureStateCollection: creating');
-    const dummyVector = Array(DIMS).fill(0);
-    dummyVector[0] = 0.001;
     await qdrantRequest('PUT', `/collections/${STATE_COLLECTION}`, {
       vectors: { size: DIMS, distance: 'Cosine' },
     });
@@ -86,24 +83,28 @@ export async function setState(
     updatedBy,
   };
 
+  const pointId = STATE_KEY_IDS[key];
+
   await qdrantRequest('PUT', `/collections/${STATE_COLLECTION}/points`, {
     points: [{
-      id: stableId(key),
+      id: pointId,
       vector: dummyVector,
       payload: state,
     }],
   });
 
-  console.log(`[ecosystem-state] setState: stored key=${key}`);
+  console.log(`[ecosystem-state] setState: stored key=${key} id=${pointId}`);
 }
 
 export async function getState(key: StateKey): Promise<EcosystemState | null> {
   console.log(`[ecosystem-state] getState: key=${key}`);
 
+  const pointId = STATE_KEY_IDS[key];
+
   try {
     const result = await qdrantRequest(
       'GET',
-      `/collections/${STATE_COLLECTION}/points/${stableId(key)}`
+      `/collections/${STATE_COLLECTION}/points/${pointId}`
     ) as { result: { payload: EcosystemState } | null };
 
     if (!result.result) {
