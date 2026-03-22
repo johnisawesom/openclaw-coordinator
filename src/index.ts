@@ -39,7 +39,7 @@ const BOT_VERSION = '1.9.0';
 interface FixSuggestion {
   file: string;
   line: number;
-  action: 'delete_line' | 'replace_line' | 'insert_after';
+  return parsed as FixSuggestion;
   newContent: string;
   description: string;
 }
