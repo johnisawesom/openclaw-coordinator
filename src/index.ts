@@ -97,7 +97,7 @@ async function callQABot(
   }
 
   console.log('[QA] Sending fix for review...');
-
+  const timeout = setTimeout(() => controller.abort(), 10000);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
 
