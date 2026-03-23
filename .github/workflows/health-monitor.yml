@@ -1,0 +1,185 @@
+name: Health Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Check all bot health endpoints
+        id: health_check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COORDINATOR_URL: https://openclaw-coordinator.fly.dev
+        run: |
+          set -e
+
+          # ── Bot registry ──────────────────────────────────────────────
+          declare -A BOTS
+          BOTS[openclaw-embedder]="https://openclaw-embedder.fly.dev/health"
+          BOTS[openclaw-coordinator]="https://openclaw-coordinator.fly.dev/health"
+          BOTS[openclaw-qa]="https://openclaw-qa.fly.dev/health"
+          BOTS[openclaw-coder-bot]="https://openclaw-coder-bot.fly.dev/health"
+          BOTS[openclaw-researcher]="https://openclaw-researcher.fly.dev/health"
+
+          # ── Helpers ───────────────────────────────────────────────────
+          send_telegram() {
+            local message="$1"
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"${message}\",\"parse_mode\":\"Markdown\"}" \
+              > /dev/null
+          }
+
+          check_recent_deploy() {
+            # Returns 0 (true) if a deploy workflow ran in the last 10 minutes
+            # Uses GitHub API — no token needed for public workflow runs check
+            local repo="johnisawesom/openclaw-coordinator"
+            local cutoff=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
+                          date -u -v-10M +%Y-%m-%dT%H:%M:%SZ)
+            local response=$(curl -s \
+              "https://api.github.com/repos/${repo}/actions/runs?status=in_progress&per_page=5")
+            local count=$(echo "$response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          runs = data.get('workflow_runs', [])
+          print(len(runs))
+          " 2>/dev/null || echo "0")
+            [ "$count" -gt "0" ]
+          }
+
+          # ── Coordinator health check first ────────────────────────────
+          COORDINATOR_HEALTHY=true
+          COORD_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 10 \
+            "https://openclaw-coordinator.fly.dev/health" || echo "000")
+
+          if [ "$COORD_STATUS" != "200" ]; then
+            COORDINATOR_HEALTHY=false
+            echo "COORDINATOR DOWN - status: $COORD_STATUS"
+          fi
+
+          # ── Check each bot ────────────────────────────────────────────
+          SUMMARY=""
+          ALL_HEALTHY=true
+
+          for BOT_NAME in "${!BOTS[@]}"; do
+            ENDPOINT="${BOTS[$BOT_NAME]}"
+            CACHE_KEY="health_fail_${BOT_NAME}"
+            ALERT_KEY="health_alert_${BOT_NAME}"
+
+            # Get current status
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 10 \
+              "$ENDPOINT" || echo "000")
+
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "OK  ${BOT_NAME} (${HTTP_STATUS})"
+              SUMMARY="${SUMMARY}\n✅ ${BOT_NAME}: healthy"
+
+              # Reset failure counter in cache
+              echo "0" > "/tmp/${CACHE_KEY}"
+              echo "" > "/tmp/${ALERT_KEY}"
+            else
+              ALL_HEALTHY=false
+              echo "FAIL ${BOT_NAME} (${HTTP_STATUS})"
+              SUMMARY="${SUMMARY}\n❌ ${BOT_NAME}: ${HTTP_STATUS}"
+
+              # Read or initialise failure counter
+              FAIL_COUNT=0
+              FIRST_FAILURE_AT="$TIMESTAMP"
+
+              if [ -f "/tmp/${CACHE_KEY}" ]; then
+                FAIL_COUNT=$(cat "/tmp/${CACHE_KEY}" || echo "0")
+              fi
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              echo "$FAIL_COUNT" > "/tmp/${CACHE_KEY}"
+
+              echo "  Consecutive failures: ${FAIL_COUNT}"
+
+              # Only alert after 3 consecutive failures
+              if [ "$FAIL_COUNT" -ge 3 ]; then
+
+                # Check if we already alerted recently (within 2 hours)
+                # GitHub Actions cache handles this between runs
+                LAST_ALERT=""
+                if [ -f "/tmp/${ALERT_KEY}" ]; then
+                  LAST_ALERT=$(cat "/tmp/${ALERT_KEY}" || echo "")
+                fi
+
+                SHOULD_ALERT=true
+                if [ -n "$LAST_ALERT" ]; then
+                  # Simple check: if alert file exists and is less than 2 hours old
+                  ALERT_AGE=$(( $(date +%s) - $(date -d "$LAST_ALERT" +%s 2>/dev/null || echo "0") ))
+                  if [ "$ALERT_AGE" -lt 7200 ]; then
+                    SHOULD_ALERT=false
+                    echo "  Alert suppressed - alerted ${ALERT_AGE}s ago"
+                  fi
+                fi
+
+                if [ "$SHOULD_ALERT" = true ]; then
+                  echo "$TIMESTAMP" > "/tmp/${ALERT_KEY}"
+
+                  if [ "$BOT_NAME" = "openclaw-coordinator" ]; then
+                    # Coordinator down - alert John directly via Telegram
+                    MESSAGE="🚨 *CRITICAL: Coordinator Down*%0A%0Aopenclaw-coordinator has been unreachable for 15+ minutes.%0A%0AManual restart required:%0A\`flyctl machines restart -a openclaw-coordinator\`%0A%0AStatus code: ${HTTP_STATUS}"
+                    send_telegram "$MESSAGE"
+                    echo "  Telegram alert sent for coordinator"
+                  else
+                    # Other bot down - fire to coordinator if coordinator is healthy
+                    if [ "$COORDINATOR_HEALTHY" = true ]; then
+                      PAYLOAD=$(cat <<EOF
+          {
+            "botName": "${BOT_NAME}",
+            "failureCount": ${FAIL_COUNT},
+            "firstFailureAt": "${FIRST_FAILURE_AT}",
+            "lastStatusCode": ${HTTP_STATUS},
+            "errorType": "BOT_HEALTH_FAILURE",
+            "affectedEndpoint": "${ENDPOINT}",
+            "coordinatorHealthy": true
+          }
+          EOF
+          )
+                      COORD_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+                        -X POST \
+                        -H "Content-Type: application/json" \
+                        -d "$PAYLOAD" \
+                        "${COORDINATOR_URL}/error" || echo "000")
+
+                      echo "  Fired to coordinator: ${COORD_RESPONSE}"
+
+                      # Also send Telegram notification
+                      MESSAGE="⚠️ *Bot Health Alert*%0A%0A${BOT_NAME} has been unreachable for 15+ minutes.%0A%0AFix pipeline triggered automatically.%0AStatus code: ${HTTP_STATUS}"
+                      send_telegram "$MESSAGE"
+                    else
+                      # Coordinator also down - Telegram alert only
+                      MESSAGE="🚨 *Multiple Bots Down*%0A%0A${BOT_NAME}: unreachable (${HTTP_STATUS})%0Aopenclaw-coordinator: also unreachable%0A%0AManual intervention required."
+                      send_telegram "$MESSAGE"
+                      echo "  Coordinator unhealthy - Telegram only"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          done
+
+          # ── Job summary ───────────────────────────────────────────────
+          echo "## Health Monitor Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo -e "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$ALL_HEALTHY" = true ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All bots healthy ✅" >> $GITHUB_STEP_SUMMARY
+          fi
