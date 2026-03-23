@@ -8,7 +8,7 @@ const EMBEDDER_URL = process.env.EMBEDDER_URL || '';
 
 const DIMS = 384;
 
-// ── Interfaces ────────────────────────────────────────────────────────────────
+// -- Interfaces ----------------------------------------------------------------
 
 export interface CommitSummary {
   sha: string;
@@ -68,7 +68,7 @@ export interface ErrorMemory {
   relatedErrorIds?: string[];
   causedByFixId?: string;
 
-  // LEGACY — backward compatibility
+  // LEGACY -- backward compatibility
   details?: Record<string, unknown>;
 }
 
@@ -85,7 +85,31 @@ export interface CompactionRule {
   action: 'delete' | 'archive';
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+export interface ReputationEvent {
+  botName: string;
+  eventType:
+    | 'fix_merged'
+    | 'fix_reverted'
+    | 'qa_blocked'
+    | 'build_passed_first_attempt'
+    | 'diagnosis_confirmed'
+    | 'diagnosis_wrong'
+    | 'finding_stored'
+    | 'finding_used'
+    | 'article_delivered'
+    | 'article_rated';
+  timestamp: string;
+  metadata: {
+    prUrl?: string;
+    confidence?: number;
+    errorType?: string;
+    topic?: string;
+    articleId?: string;
+    rating?: number;
+  };
+}
+
+// -- Helpers ------------------------------------------------------------------
 
 async function qdrantRequest(
   method: string,
@@ -139,7 +163,7 @@ async function ensurePayloadIndex(
     console.log(`[qdrant-logger] ensurePayloadIndex: index on ${collection}.${field} confirmed`);
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
-    console.log(`[qdrant-logger] ensurePayloadIndex: ${collection}.${field} — ${err.message.slice(0, 80)}`);
+    console.log(`[qdrant-logger] ensurePayloadIndex: ${collection}.${field} -- ${err.message.slice(0, 80)}`);
   }
 }
 
@@ -156,7 +180,6 @@ export async function ensureCollection(name: string, dims: number = DIMS): Promi
     console.log(`[qdrant-logger] ensureCollection: ${name} created`);
   }
 
-  // Ensure payload indexes for filterable fields
   if (name === 'coordinator_logs') {
     await ensurePayloadIndex(name, 'prUrl');
     await ensurePayloadIndex(name, 'fixAttempt.file');
@@ -173,7 +196,7 @@ export async function ensureCollection(name: string, dims: number = DIMS): Promi
   }
 }
 
-// ── Core Operations ───────────────────────────────────────────────────────────
+// -- Core Operations ----------------------------------------------------------
 
 export async function upsertPoint(
   memory: ErrorMemory,
@@ -320,7 +343,7 @@ export async function recentSmokeExists(): Promise<boolean> {
   return recent.length > 0;
 }
 
-// ── Compaction ────────────────────────────────────────────────────────────────
+// -- Compaction ---------------------------------------------------------------
 
 export async function compactCollection(
   collection: string,
@@ -432,4 +455,25 @@ export async function collectMemoryMetrics(): Promise<void> {
   });
 
   console.log('[qdrant-logger] collectMemoryMetrics: persisted to coordinator_metrics');
+}
+
+export async function writeReputationEvent(event: ReputationEvent): Promise<void> {
+  console.log(`[qdrant-logger] writeReputationEvent: bot=${event.botName} event=${event.eventType}`);
+  try {
+    const vectorText = `${event.botName}:${event.eventType}`;
+    const embedding = await getEmbedding(vectorText);
+
+    await qdrantRequest('PUT', `/collections/ecosystem_reputation/points`, {
+      points: [{
+        id: crypto.randomUUID(),
+        vector: embedding,
+        payload: { ...event },
+      }],
+    });
+
+    console.log(`[qdrant-logger] writeReputationEvent: stored ${event.eventType} for ${event.botName}`);
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    console.log(`[qdrant-logger] writeReputationEvent: fire-and-forget swallowed error -- ${err.message.slice(0, 120)}`);
+  }
 }
