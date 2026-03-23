@@ -13,9 +13,11 @@ import {
   ensureCollection,
   updateDiagnosis,
   findRecentFixForFile,
+  writeReputationEvent,
   ErrorMemory,
   RecallMatch,
   DiagnosisRecord,
+  ReputationEvent,
 } from './qdrant-logger.js';
 import { writeToEcosystem, searchEcosystem, EcosystemEntry } from './ecosystem-memory.js';
 import {
@@ -35,7 +37,7 @@ console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
 const ECOSYSTEM_VERSION = process.env.ECOSYSTEM_VERSION || '1.0';
-const BOT_VERSION = '1.9.1';
+const BOT_VERSION = '1.9.2';
 
 interface FixSuggestion {
   file: string;
@@ -559,6 +561,12 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
 
     if (qaResult.status === 'FAIL') {
       console.warn(`[Decision] PR blocked by QA Bot — stopping`);
+      writeReputationEvent({
+        botName: 'openclaw-qa',
+        eventType: 'qa_blocked',
+        timestamp: new Date().toISOString(),
+        metadata: { errorType: enriched.type },
+      } satisfies ReputationEvent).catch(() => {});
       return;
     }
 
@@ -569,6 +577,12 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       const coderResult = await callCoderBot(fixJson);
       branch = coderResult.branch;
       console.log(`[Decision] Coder Bot success — branch: ${branch}`);
+      writeReputationEvent({
+        botName: 'openclaw-coder-bot',
+        eventType: 'build_passed_first_attempt',
+        timestamp: new Date().toISOString(),
+        metadata: { errorType: enriched.type },
+      } satisfies ReputationEvent).catch(() => {});
     } catch (coderErr: unknown) {
       const e = coderErr instanceof Error ? coderErr : new Error(String(coderErr));
       console.error(`[Decision] Coder Bot failed: ${e.message}`);
@@ -826,6 +840,40 @@ async function main(): Promise<void> {
           const e = err instanceof Error ? err : new Error(String(err));
           console.error('[Webhook] updateConfidence failed:', e.message);
         });
+
+        if (!merged) {
+          writeReputationEvent({
+            botName: 'openclaw-coordinator',
+            eventType: 'fix_reverted',
+            timestamp: new Date().toISOString(),
+            metadata: { prUrl, confidence },
+          } satisfies ReputationEvent).catch(() => {});
+        } else if (confidence >= 0.7) {
+          writeReputationEvent({
+            botName: 'openclaw-coordinator',
+            eventType: 'fix_merged',
+            timestamp: new Date().toISOString(),
+            metadata: { prUrl, confidence },
+          } satisfies ReputationEvent).catch(() => {});
+        }
+
+        if (merged && confidence === 1.0) {
+          writeReputationEvent({
+            botName: 'openclaw-coordinator',
+            eventType: 'diagnosis_confirmed',
+            timestamp: new Date().toISOString(),
+            metadata: { prUrl, confidence },
+          } satisfies ReputationEvent).catch(() => {});
+        }
+
+        if (merged && outcomeLabel === 'wrong-diagnosis') {
+          writeReputationEvent({
+            botName: 'openclaw-coordinator',
+            eventType: 'diagnosis_wrong',
+            timestamp: new Date().toISOString(),
+            metadata: { prUrl, confidence },
+          } satisfies ReputationEvent).catch(() => {});
+        }
       });
       return;
     }
