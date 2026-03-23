@@ -139,7 +139,6 @@ async function ensurePayloadIndex(
     console.log(`[qdrant-logger] ensurePayloadIndex: index on ${collection}.${field} confirmed`);
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
-    // Index may already exist — not an error
     console.log(`[qdrant-logger] ensurePayloadIndex: ${collection}.${field} — ${err.message.slice(0, 80)}`);
   }
 }
@@ -259,6 +258,18 @@ export async function updateDiagnosis(
     payload: { diagnosis },
   });
   console.log(`[qdrant-logger] updateDiagnosis: diagnosis stored confidence=${diagnosis.confidence}`);
+}
+
+export async function updatePrUrl(
+  pointId: string,
+  prUrl: string
+): Promise<void> {
+  console.log(`[qdrant-logger] updatePrUrl: writing prUrl to point ${pointId}`);
+  await qdrantRequest('POST', `/collections/${COLLECTION}/points/payload`, {
+    points: [pointId],
+    payload: { prUrl },
+  });
+  console.log(`[qdrant-logger] updatePrUrl: prUrl stored for point ${pointId}`);
 }
 
 export async function findRecentFixForFile(
