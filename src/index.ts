@@ -37,7 +37,7 @@ console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
 const ECOSYSTEM_VERSION = process.env.ECOSYSTEM_VERSION || '1.0';
-const BOT_VERSION = '1.9.3';
+const BOT_VERSION = '1.9.4';
 
 interface FixSuggestion {
   file: string;
