@@ -1,6 +1,6 @@
-//typescript 
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { setState, getState } from './ecosystem-state.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const google = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? '');
@@ -45,9 +45,28 @@ const TASK_CONFIG: Record<LLMTask, TaskConfig> = {
 };
 
 const BACKOFF_MS = [1000, 2000, 4000];
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function isRateLimitActive(): Promise<boolean> {
+  try {
+    const state = await getState('rate_limit_hit');
+    if (!state || state.value !== 'true') return false;
+    const setAt = new Date(state.updatedAt).getTime();
+    const age = Date.now() - setAt;
+    if (age > RATE_LIMIT_WINDOW_MS) {
+      console.log(`[LLM] rate_limit_hit expired (age=${Math.round(age / 1000)}s) -- clearing`);
+      setState('rate_limit_hit', 'false').catch(() => {});
+      return false;
+    }
+    console.warn(`[LLM] rate_limit_hit active (age=${Math.round(age / 1000)}s) -- skipping Anthropic`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function callAnthropic(
@@ -57,9 +76,14 @@ async function callAnthropic(
   maxTokens: number,
   task: LLMTask
 ): Promise<string> {
+  const rateLimited = await isRateLimitActive();
+  if (rateLimited) {
+    throw new Error('RATE_LIMIT_EXHAUSTED');
+  }
+
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      console.log(`[LLM] ${task} → ${model} (anthropic attempt ${attempt + 1})`);
+      console.log(`[LLM] ${task} -> ${model} (anthropic attempt ${attempt + 1})`);
       const response = await anthropic.messages.create({
         model,
         max_tokens: maxTokens,
@@ -68,20 +92,21 @@ async function callAnthropic(
       });
       const block = response.content[0];
       if (block.type !== 'text') throw new Error('Non-text response from Anthropic');
-      console.log(`[LLM] ${task} → ${model} succeeded`);
+      console.log(`[LLM] ${task} -> ${model} succeeded`);
       return block.text;
     } catch (err: unknown) {
       const error = err as { status?: number; message?: string };
       if (error.status === 429) {
-        console.warn(`[LLM] ${task} → ${model} rate limited (attempt ${attempt + 1})`);
+        console.warn(`[LLM] ${task} -> ${model} rate limited (attempt ${attempt + 1})`);
         if (attempt < 2) {
           await sleep(BACKOFF_MS[attempt] ?? 1000);
           continue;
         }
-        console.warn(`[LLM] ${task} → ${model} rate limit exhausted after 3 attempts — switching to fallback`);
+        console.warn(`[LLM] ${task} -> ${model} rate limit exhausted after 3 attempts -- setting ecosystem rate_limit_hit`);
+        setState('rate_limit_hit', 'true', 'llm-router').catch(() => {});
         throw new Error('RATE_LIMIT_EXHAUSTED');
       }
-      console.error(`[LLM] ${task} → ${model} non-rate-limit error: status=${error.status ?? 'none'} message=${error.message ?? 'unknown'}`);
+      console.error(`[LLM] ${task} -> ${model} non-rate-limit error: status=${error.status ?? 'none'} message=${error.message ?? 'unknown'}`);
       throw err;
     }
   }
@@ -96,7 +121,7 @@ async function callGoogle(
   task: LLMTask
 ): Promise<string> {
   try {
-    console.log(`[LLM] ${task} → ${model} (google fallback)`);
+    console.log(`[LLM] ${task} -> ${model} (google fallback)`);
     const generativeModel = google.getGenerativeModel({
       model,
       systemInstruction: systemPrompt,
@@ -106,11 +131,11 @@ async function callGoogle(
       generationConfig: { maxOutputTokens: maxTokens },
     });
     const text = result.response.text();
-    console.log(`[LLM] ${task} → ${model} (google) succeeded`);
+    console.log(`[LLM] ${task} -> ${model} (google) succeeded`);
     return text;
   } catch (err: unknown) {
     const error = err as { message?: string };
-    console.error(`[LLM] ${task} → ${model} (google) failed: ${error.message ?? 'unknown'}`);
+    console.error(`[LLM] ${task} -> ${model} (google) failed: ${error.message ?? 'unknown'}`);
     throw new Error('GOOGLE_FAILED');
   }
 }
@@ -141,11 +166,11 @@ export async function callLLM(request: LLMRequest): Promise<LLMResponse> {
         );
         return { text, provider: 'google', model: config.googleModel };
       } catch {
-        console.error(`[LLM] BOTH_FAILED for task ${task} — both providers exhausted`);
+        console.error(`[LLM] BOTH_FAILED for task ${task} -- both providers exhausted`);
         throw new Error(`LLM_BOTH_FAILED:${task}`);
       }
     }
-    console.error(`[LLM] BOTH_FAILED for task ${task} — anthropic non-rate-limit error`);
+    console.error(`[LLM] BOTH_FAILED for task ${task} -- anthropic non-rate-limit error`);
     throw new Error(`LLM_BOTH_FAILED:${task}`);
   }
 }
