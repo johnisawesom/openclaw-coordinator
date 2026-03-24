@@ -37,7 +37,7 @@ console.log('[INFO] createFixPR loaded:', typeof createFixPR);
 const PORT = 8080;
 const SMOKE_COLLECTION = 'coordinator_smoke';
 const ECOSYSTEM_VERSION = process.env.ECOSYSTEM_VERSION || '1.0';
-const BOT_VERSION = '1.9.2';
+const BOT_VERSION = '1.9.3';
 
 interface FixSuggestion {
   file: string;
@@ -94,7 +94,7 @@ async function callQABot(
   const qaUrl = process.env.QA_BOT_URL;
 
   if (!qaUrl) {
-    console.warn('[QA] QA_BOT_URL not set — blocking PR as safe default');
+    console.warn('[QA] QA_BOT_URL not set -- blocking PR as safe default');
     return { status: 'FAIL', reason: 'QA_BOT_URL environment variable not set' };
   }
 
@@ -114,17 +114,17 @@ async function callQABot(
     clearTimeout(timeout);
 
     const result = await response.json() as { status: 'PASS' | 'FAIL'; reason: string };
-    console.log(`[QA] ${result.status} — ${result.reason}`);
+    console.log(`[QA] ${result.status} -- ${result.reason}`);
     return result;
 
   } catch (err: unknown) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === 'AbortError') {
-      console.warn('[QA] Request timed out after 10s — blocking PR as safe default');
+      console.warn('[QA] Request timed out after 10s -- blocking PR as safe default');
       return { status: 'FAIL', reason: 'QA Bot request timed out' };
     }
     console.warn(
-      `[QA] Request failed — blocking PR as safe default: ${err instanceof Error ? err.message : String(err)}`
+      `[QA] Request failed -- blocking PR as safe default: ${err instanceof Error ? err.message : String(err)}`
     );
     return { status: 'FAIL', reason: 'QA Bot unreachable' };
   }
@@ -160,7 +160,7 @@ async function callCoderBot(fix: FixSuggestion): Promise<{ branch: string; commi
       throw new Error(`Coder Bot rejected fix: ${result.reason}`);
     }
 
-    console.log(`[Coder] Success — branch: ${result.branch}, commit: ${result.commitSha}`);
+    console.log(`[Coder] Success -- branch: ${result.branch}, commit: ${result.commitSha}`);
     return { branch: result.branch, commitSha: result.commitSha };
 
   } catch (err: unknown) {
@@ -182,10 +182,30 @@ function buildRecallContext(
   tier2Count: number;
   ecosystemCount: number;
 } {
-  const tier1 = matches.filter(m => m.tier === 'primary');
-  const tier2 = matches.filter(
-    m => m.tier === 'ecosystem' && (m.memory.confidence ?? 0.5) > 0.3
-  );
+  const now = Date.now();
+  const DECAY_WINDOW_DAYS = 90;
+
+  // Apply time-weighted decay: effectiveScore = rawScore * (1 - age_in_days / 90)
+  // Clamp to 0 floor -- memories older than 90 days get zero weight
+  const weighted = matches.map((m) => {
+    const ts = m.memory.timestamp ? new Date(m.memory.timestamp).getTime() : now;
+    const ageInDays = (now - ts) / (1000 * 60 * 60 * 24);
+    const decayFactor = Math.max(0, 1 - ageInDays / DECAY_WINDOW_DAYS);
+    const effectiveScore = m.score * decayFactor;
+    console.log(`[Recall] id=${m.id} rawScore=${m.score.toFixed(3)} ageInDays=${ageInDays.toFixed(1)} decayFactor=${decayFactor.toFixed(3)} effectiveScore=${effectiveScore.toFixed(3)}`);
+    return { match: m, effectiveScore };
+  });
+
+  // Sort by effective score descending before tier selection
+  weighted.sort((a, b) => b.effectiveScore - a.effectiveScore);
+
+  const tier1 = weighted
+    .filter(w => w.match.tier === 'primary')
+    .map(w => ({ ...w.match, effectiveScore: w.effectiveScore }));
+
+  const tier2 = weighted
+    .filter(w => w.match.tier === 'ecosystem' && (w.match.memory.confidence ?? 0.5) > 0.3)
+    .map(w => ({ ...w.match, effectiveScore: w.effectiveScore }));
 
   const selectedTier1 = tier1.slice(0, 3);
   const tier2Slots = Math.max(0, 2 - selectedTier1.length);
@@ -196,7 +216,7 @@ function buildRecallContext(
     .map(m => {
       const payload = JSON.stringify(m.memory).slice(0, 200);
       const tierLabel = m.tier === 'primary' ? 'validated' : 'unvalidated';
-      return `Past fix [${tierLabel}] (score ${m.score.toFixed(3)}, confidence ${(m.memory.confidence ?? 0.5).toFixed(2)}): ${payload}`;
+      return `Past fix [${tierLabel}] (rawScore ${m.score.toFixed(3)}, effectiveScore ${m.effectiveScore.toFixed(3)}, confidence ${(m.memory.confidence ?? 0.5).toFixed(2)}): ${payload}`;
     })
     .join('\n\n');
 
@@ -204,9 +224,11 @@ function buildRecallContext(
   const ecosystemContext = selectedEcosystem
     .map(e => {
       const snippet = e.content.slice(0, 150);
-      return `Cross-bot insight (${e.bot}): ${e.title} — ${snippet}`;
+      return `Cross-bot insight (${e.bot}): ${e.title} -- ${snippet}`;
     })
     .join('\n\n');
+
+  console.log(`[Recall] Selected ${selectedTier1.length} tier1 + ${selectedTier2.length} tier2 after decay sort`);
 
   return {
     localContext,
@@ -217,7 +239,7 @@ function buildRecallContext(
   };
 }
 
-// ── Phase 1: Enrich ───────────────────────────────────────────────────────────
+// -- Phase 1: Enrich ----------------------------------------------------------
 
 async function enrichError(error: ErrorMemory): Promise<ErrorMemory> {
   console.log(`[Enrich] Phase 1: enriching error type=${error.type}`);
@@ -245,7 +267,7 @@ async function enrichError(error: ErrorMemory): Promise<ErrorMemory> {
     try {
       const recentFix = await findRecentFixForFile(file, 7);
       if (recentFix) {
-        console.log(`[Enrich] Found recent fix for ${file} — possible recurrence`);
+        console.log(`[Enrich] Found recent fix for ${file} -- possible recurrence`);
         enriched.relatedErrorIds = enriched.relatedErrorIds || [];
         if (recentFix.prUrl) {
           enriched.relatedErrorIds.push(recentFix.prUrl);
@@ -258,11 +280,11 @@ async function enrichError(error: ErrorMemory): Promise<ErrorMemory> {
     }
   }
 
-  console.log(`[Enrich] Phase 1 complete — fileContent=${!!enriched.fileContent} commits=${enriched.recentCommits?.length ?? 0} recurred=${enriched.recurredAfterFix ?? false}`);
+  console.log(`[Enrich] Phase 1 complete -- fileContent=${!!enriched.fileContent} commits=${enriched.recentCommits?.length ?? 0} recurred=${enriched.recurredAfterFix ?? false}`);
   return enriched;
 }
 
-// ── Phase 2: Diagnose ─────────────────────────────────────────────────────────
+// -- Phase 2: Diagnose --------------------------------------------------------
 
 async function diagnoseError(
   enriched: ErrorMemory,
@@ -350,7 +372,7 @@ Confidence guide:
       diagnosedAt: new Date().toISOString(),
     };
 
-    console.log(`[Diagnose] Parsed — confidence=${diagnosis.confidence} risk=${diagnosis.riskLevel}`);
+    console.log(`[Diagnose] Parsed -- confidence=${diagnosis.confidence} risk=${diagnosis.riskLevel}`);
     console.log(`[Diagnose] Root cause: ${diagnosis.rootCause}`);
 
   } catch (parseErr: unknown) {
@@ -370,7 +392,7 @@ Confidence guide:
   return diagnosis;
 }
 
-// ── Main error handler ────────────────────────────────────────────────────────
+// -- Main error handler -------------------------------------------------------
 
 export async function handleError(error: ErrorMemory): Promise<void> {
   console.log(`[Decision] ========== handleError start ==========`);
@@ -381,12 +403,12 @@ export async function handleError(error: ErrorMemory): Promise<void> {
   try {
     const processingState = await getState('coordinator_processing');
     if (processingState && processingState.value === 'true') {
-      console.warn('[Decision] Phase 0: coordinator_processing=true — skipping to avoid concurrent fixes');
+      console.warn('[Decision] Phase 0: coordinator_processing=true -- skipping to avoid concurrent fixes');
       return;
     }
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
-    console.warn(`[Decision] Phase 0: could not read state — proceeding: ${err.message}`);
+    console.warn(`[Decision] Phase 0: could not read state -- proceeding: ${err.message}`);
   }
 
   try {
@@ -394,7 +416,7 @@ export async function handleError(error: ErrorMemory): Promise<void> {
     console.log('[Decision] Phase 0: coordinator_processing set to true');
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
-    console.warn(`[Decision] Phase 0: could not set state — proceeding: ${err.message}`);
+    console.warn(`[Decision] Phase 0: could not set state -- proceeding: ${err.message}`);
   }
 
   try {
@@ -405,7 +427,7 @@ export async function handleError(error: ErrorMemory): Promise<void> {
     };
 
     const pointId = await upsertPoint(enrichedBase);
-    console.log(`[Decision] Upserted to coordinator_logs — point ID: ${pointId}`);
+    console.log(`[Decision] Upserted to coordinator_logs -- point ID: ${pointId}`);
 
     writeToEcosystem({
       bot: 'coordinator',
@@ -416,7 +438,7 @@ export async function handleError(error: ErrorMemory): Promise<void> {
       metadata: { pointId },
     }).catch((err: unknown) => {
       const e = err instanceof Error ? err : new Error(String(err));
-      console.warn(`[Ecosystem] Write failed — not blocking handleError: ${e.message}`);
+      console.warn(`[Ecosystem] Write failed -- not blocking handleError: ${e.message}`);
     });
 
     // Phase 1: Enrich
@@ -426,7 +448,7 @@ export async function handleError(error: ErrorMemory): Promise<void> {
     const diagnosis = await diagnoseError(enriched, pointId);
 
     if (!diagnosis) {
-      console.warn('[Decision] Phase 2: diagnosis returned null — cannot proceed to fix');
+      console.warn('[Decision] Phase 2: diagnosis returned null -- cannot proceed to fix');
       await openDiagnosisIssue(
         enriched.type,
         enriched.message,
@@ -439,10 +461,10 @@ export async function handleError(error: ErrorMemory): Promise<void> {
       return;
     }
 
-    console.log(`[Decision] Phase 2 complete — confidence=${diagnosis.confidence} threshold=0.7`);
+    console.log(`[Decision] Phase 2 complete -- confidence=${diagnosis.confidence} threshold=0.7`);
 
     if (diagnosis.confidence < 0.7) {
-      console.warn(`[Decision] Phase 2: confidence ${diagnosis.confidence} below 0.7 — opening NEEDS_DIAGNOSIS issue`);
+      console.warn(`[Decision] Phase 2: confidence ${diagnosis.confidence} below 0.7 -- opening NEEDS_DIAGNOSIS issue`);
       await openDiagnosisIssue(
         enriched.type,
         enriched.message,
@@ -455,9 +477,9 @@ export async function handleError(error: ErrorMemory): Promise<void> {
       return;
     }
 
-    console.log('[Decision] Phase 2: confidence sufficient — proceeding to fix generation');
+    console.log('[Decision] Phase 2: confidence sufficient -- proceeding to fix generation');
 
-    // Phase 3: Generate fix
+    // Phase 3: Generate fix with time-weighted recall
     const [matches, ecosystemMatches] = await Promise.all([
       searchSimilarLogs(enriched.message),
       searchEcosystem(enriched.message),
@@ -524,7 +546,7 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
     } catch (llmErr: unknown) {
       const e = llmErr instanceof Error ? llmErr : new Error(String(llmErr));
       if (e.message.startsWith('LLM_BOTH_FAILED')) {
-        console.error(`[Decision] LLM_BOTH_FAILED — both providers exhausted, logging to memory`);
+        console.error(`[Decision] LLM_BOTH_FAILED -- both providers exhausted, logging to memory`);
         await upsertPoint({
           timestamp: new Date().toISOString(),
           ecosystemVersion: ECOSYSTEM_VERSION,
@@ -545,7 +567,7 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
     let fixJson: FixSuggestion;
     try {
       fixJson = parseFixSuggestion(llmText);
-      console.log(`[Decision] Fix parsed — file: ${fixJson.file} line: ${fixJson.line} action: ${fixJson.action}`);
+      console.log(`[Decision] Fix parsed -- file: ${fixJson.file} line: ${fixJson.line} action: ${fixJson.action}`);
     } catch (parseErr: unknown) {
       const e = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
       console.error('[PARSE ERROR] LLM did not return valid JSON:', e.message);
@@ -557,10 +579,10 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
     const tempPrUrl = `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/pending`;
     console.log(`[Decision] Phase 4: sending to QA Bot`);
     const qaResult = await callQABot(fixJson, tempPrUrl);
-    console.log(`[Decision] QA result: ${qaResult.status} — ${qaResult.reason}`);
+    console.log(`[Decision] QA result: ${qaResult.status} -- ${qaResult.reason}`);
 
     if (qaResult.status === 'FAIL') {
-      console.warn(`[Decision] PR blocked by QA Bot — stopping`);
+      console.warn(`[Decision] PR blocked by QA Bot -- stopping`);
       writeReputationEvent({
         botName: 'openclaw-qa',
         eventType: 'qa_blocked',
@@ -570,13 +592,13 @@ Valid actions: delete_line, replace_line, insert_after. No explanation outside t
       return;
     }
 
-    console.log(`[Decision] QA passed — sending to Coder Bot`);
+    console.log(`[Decision] QA passed -- sending to Coder Bot`);
 
     let branch: string;
     try {
       const coderResult = await callCoderBot(fixJson);
       branch = coderResult.branch;
-      console.log(`[Decision] Coder Bot success — branch: ${branch}`);
+      console.log(`[Decision] Coder Bot success -- branch: ${branch}`);
       writeReputationEvent({
         botName: 'openclaw-coder-bot',
         eventType: 'build_passed_first_attempt',
@@ -621,7 +643,6 @@ _Generated by OpenClaw Coordinator v${BOT_VERSION}. Apply label before closing._
     const prUrl = await createFixPR(prBody, enriched.type, branch);
     console.log(`[Decision] PR opened: ${prUrl}`);
 
-    // Write real PR URL back to Qdrant point now that we have it
     updatePrUrl(pointId, prUrl).catch((e: unknown) => {
       const err = e instanceof Error ? e : new Error(String(e));
       console.warn(`[Decision] Could not write prUrl back to point: ${err.message}`);
@@ -712,21 +733,21 @@ async function main(): Promise<void> {
     const recentExists = await recentSmokeExists();
 
     if (recentExists) {
-      console.log('[Smoke] Recent smoke point found (< 1hr) — skipping write to avoid accumulation');
+      console.log('[Smoke] Recent smoke point found (< 1hr) -- skipping write to avoid accumulation');
     } else {
       const smokeError: ErrorMemory = {
         timestamp: new Date().toISOString(),
         ecosystemVersion: ECOSYSTEM_VERSION,
         type: 'SmokeTest',
-        message: 'boot smoke test — memory check only',
+        message: 'boot smoke test -- memory check only',
         details: { file: 'index.ts', line: 0 },
       };
 
       const id = await upsertPoint(smokeError, SMOKE_COLLECTION);
-      console.log(`[Smoke] Upserted point ID: ${id} — written to coordinator_smoke`);
+      console.log(`[Smoke] Upserted point ID: ${id} -- written to coordinator_smoke`);
     }
 
-    console.log('[Smoke] Memory layer confirmed OK — smoke isolated from recall');
+    console.log('[Smoke] Memory layer confirmed OK -- smoke isolated from recall');
 
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e));
@@ -742,9 +763,9 @@ async function main(): Promise<void> {
     }
 
     if (req.method === 'POST' && req.url === '/compact') {
-      console.log('[Compact] /compact triggered — running full compaction cycle');
+      console.log('[Compact] /compact triggered -- running full compaction cycle');
       res.writeHead(202, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'accepted', message: 'Compaction running — watch logs' }));
+      res.end(JSON.stringify({ status: 'accepted', message: 'Compaction running -- watch logs' }));
       runCompactionCycle();
       return;
     }
@@ -757,21 +778,21 @@ async function main(): Promise<void> {
         const secret = process.env.GITHUB_WEBHOOK_SECRET;
 
         if (!secret) {
-          console.error('[Webhook] GITHUB_WEBHOOK_SECRET not set — rejecting');
+          console.error('[Webhook] GITHUB_WEBHOOK_SECRET not set -- rejecting');
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Webhook secret not configured' }));
           return;
         }
 
         if (!signature) {
-          console.warn('[Webhook] Missing X-Hub-Signature-256 header — rejecting');
+          console.warn('[Webhook] Missing X-Hub-Signature-256 header -- rejecting');
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Missing signature' }));
           return;
         }
 
         if (!verifyWebhookSignature(body, signature, secret)) {
-          console.warn('[Webhook] Signature mismatch — rejecting');
+          console.warn('[Webhook] Signature mismatch -- rejecting');
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid signature' }));
           return;
@@ -791,7 +812,7 @@ async function main(): Promise<void> {
         const pr = payload.pull_request as Record<string, unknown> | undefined;
 
         if (action !== 'closed' || !pr) {
-          console.log(`[Webhook] Ignoring event — action=${action ?? 'unknown'}`);
+          console.log(`[Webhook] Ignoring event -- action=${action ?? 'unknown'}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'ignored' }));
           return;
@@ -831,7 +852,7 @@ async function main(): Promise<void> {
           confidence = 0.7;
         }
 
-        console.log(`[Webhook] PR closed — merged=${merged} labels=${labelNames.join(',')} confidence=${confidence} url=${prUrl}`);
+        console.log(`[Webhook] PR closed -- merged=${merged} labels=${labelNames.join(',')} confidence=${confidence} url=${prUrl}`);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'accepted' }));
@@ -893,7 +914,7 @@ async function main(): Promise<void> {
 
         console.log('[TEST] /test-error triggered');
         res.writeHead(202, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'accepted', message: 'handleError() fired — watch logs' }));
+        res.end(JSON.stringify({ status: 'accepted', message: 'handleError() fired -- watch logs' }));
 
         handleError(testError).catch((err: unknown) => {
           const e = err instanceof Error ? err : new Error(String(err));
