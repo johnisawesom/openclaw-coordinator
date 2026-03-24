@@ -194,6 +194,11 @@ export async function ensureCollection(name: string, dims: number = DIMS): Promi
   if (name === 'researcher_logs') {
     await ensurePayloadIndex(name, 'timestamp');
   }
+  if (name === 'ecosystem_reputation') {
+    await ensurePayloadIndex(name, 'botName');
+    await ensurePayloadIndex(name, 'eventType');
+    await ensurePayloadIndex(name, 'timestamp');
+  }
 }
 
 // -- Core Operations ----------------------------------------------------------
