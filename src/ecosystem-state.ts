@@ -12,7 +12,8 @@ export type StateKey =
   | 'last_fix_pr_url'
   | 'last_health_check'
   | 'embedder_status'
-  | 'active_fix_file';
+  | 'active_fix_file'
+  | 'rate_limit_hit';
 
 export interface EcosystemState {
   key: string;
@@ -42,7 +43,6 @@ async function qdrantRequest(
   return res.json();
 }
 
-// Each StateKey maps to a fixed UUID so upsert always overwrites the same point
 const STATE_KEY_IDS: Record<StateKey, string> = {
   'coordinator_processing': '00000001-0000-0000-0000-000000000001',
   'last_fix_completed':     '00000001-0000-0000-0000-000000000002',
@@ -50,6 +50,7 @@ const STATE_KEY_IDS: Record<StateKey, string> = {
   'last_health_check':      '00000001-0000-0000-0000-000000000004',
   'embedder_status':        '00000001-0000-0000-0000-000000000005',
   'active_fix_file':        '00000001-0000-0000-0000-000000000006',
+  'rate_limit_hit':         '00000001-0000-0000-0000-000000000007',
 };
 
 export async function ensureStateCollection(): Promise<void> {
