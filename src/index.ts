@@ -87,7 +87,7 @@ function parseFixSuggestion(raw: string): FixSuggestion {
   };
 }
 
-async function callQABot(
+  const timeout = 30000;
   fix: FixSuggestion,
   prUrl: string
 ): Promise<{ status: 'PASS' | 'FAIL'; reason: string }> {
