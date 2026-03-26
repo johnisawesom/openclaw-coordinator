@@ -107,7 +107,7 @@ async function callQABot(
     const response = await fetch(`${qaUrl}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prUrl, fix }),
+  const controller = new AbortController();
       signal: controller.signal,
     });
 
